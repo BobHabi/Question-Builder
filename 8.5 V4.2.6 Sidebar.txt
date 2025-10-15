@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <style>
+    body{font-family:'Roboto',sans-serif;padding:10px;background:#f8f9fa;color:#333;font-size:14px}
+    h3{color:#1a73e8;border-bottom:2px solid #1a73e8;padding-bottom:5px;margin-top:25px;margin-bottom:15px;font-size:16px}
+    .form-group{margin-bottom:12px}
+    label{display:block;font-weight:bold;margin-bottom:5px}
+    input[type=text],input[type=number],select{width:100%;padding:8px;border-radius:4px;border:1px solid #ccc;box-sizing:border-box}
+    .collapsible{background:#e8f0fe;color:#1a73e8;cursor:pointer;padding:10px;width:100%;border:none;text-align:left;font-size:15px;font-weight:bold;margin-top:10px;border-radius:4px}
+    .collapsible:after{content:'\25BC';float:right}
+    .collapsible.active:after{content:'\25B2'}
+    .content{padding:0 10px;max-height:0;overflow:hidden;transition:max-height .2s ease-out;background:#fff;border:1px solid #e0e0e0;border-top:none;border-radius:0 0 4px 4px}
+    .content>.form-group{padding-top:10px}
+    .checkbox-grid{display:grid;grid-template-columns:1fr 1fr;gap:5px}
+    .checkbox-grid label{display:flex;align-items:center;font-weight:normal}
+    .checkbox-grid input{margin-right:5px}
+    .btn-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:20px}
+    .btn-full{grid-column:1/-1}
+    button{background:#1a73e8;color:#fff;border:none;padding:12px 15px;border-radius:10px;cursor:pointer;width:100%;font-size:14px;font-weight:700}
+    button:hover{background:#185abc}
+    #status{margin-top:15px;text-align:center;font-weight:bold;color:#0f9d58;min-height:20px}
+    #status.warn{color:#ea4335}
+    .collapsible.active-filter{border-left:4px solid #1a73e8;background:#eaf2fd}
+  </style>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto">
+</head>
+<body>
+  <h3>Core Filters</h3>
+  <div class="form-group">
+    <label for="course">Course (Required)</label>
+    <select id="course"></select>
+  </div>
+  <div class="form-group">
+    <label for="topics">Include Topic/Chapter</label>
+    <input type="text" id="topics" placeholder="e.g., T/Ch 01; T/Ch 04">
+  </div>
+  <div class="form-group">
+    <label for="exclude-topics">Exclude Topic/Chapter</label>
+    <input type="text" id="exclude-topics" placeholder="e.g., T/Ch 02">
+  </div>
+
+  <button type="button" class="collapsible" id="btnContent">Content Filters</button>
+  <div class="content" id="sectContent">
+    <div class="form-group">
+      <label>Difficulty</label>
+      <div class="checkbox-grid" id="difficulties"></div>
+    </div>
+    <div class="form-group">
+      <label>Question Type</label>
+      <div class="checkbox-grid" id="types"></div>
+    </div>
+    <div class="form-group">
+      <label>Correct/Incorrect Status</label>
+      <div class="checkbox-grid" id="correct-status"></div>
+    </div>
+  </div>
+
+  <button type="button" class="collapsible" id="btnAdvanced">Advanced Filters</button>
+  <div class="content" id="sectAdvanced">
+    <div class="form-group"><label for="my-answer">My Answer (e.g., 0; 50)</label><input type="text" id="my-answer"></div>
+    <div class="form-group"><label for="source">Source Contains</label><input type="text" id="source"></div>
+    <div class="form-group"><label for="exclude-source">Exclude Source</label><input type="text" id="exclude-source"></div>
+    <div class="form-group"><label for="search-text">Search Text (question + choices)</label><input type="text" id="search-text"></div>
+  </div>
+
+  <button type="button" class="collapsible" id="btnDate">Date & Repetition</button>
+  <div class="content" id="sectDate">
+    <div class="form-group"><label for="practiced-within">Practiced within last (days)</label><input type="number" id="practiced-within"></div>
+    <div class="form-group"><label for="not-practiced">NOT practiced in last (days)</label><input type="number" id="not-practiced"></div>
+    <div class="form-group"><input type="checkbox" id="is-practice-empty"><label for="is-practice-empty" style="display:inline-block;font-weight:normal;">Only include new (unpracticed) questions</label></div>
+  </div>
+
+  <button type="button" class="collapsible" id="btnHeader">Header & Output Settings</button>
+  <div class="content" id="sectHeader">
+    <div class="form-group"><label for="exam-title">Exam Title</label><input type="text" id="exam-title" placeholder="e.g., Midterm 1 Practice"></div>
+    <div class="form-group"><label for="exam-subtitle">Exam Subtitle / Notes</label><input type="text" id="exam-subtitle" placeholder="e.g., Chapters 1-5"></div>
+    <div class="form-group"><label for="max-questions">Max Questions (Overall Cap)</label><input type="number" id="max-questions"></div>
+    <div class="form-group"><input type="checkbox" id="shuffle" checked><label for="shuffle" style="display:inline-block;font-weight:normal;">Shuffle MCQ Choices</label></div>
+    <div class="form-group"><input type="checkbox" id="show-topic-tag" checked><label for="show-topic-tag" style="display:inline-block;font-weight:normal;">Show Topic after question (end tag)</label></div>
+    <div class="form-group"><input type="checkbox" id="include-summary"><label for="include-summary" style="display:inline-block;font-weight:normal;">Include Difficulty Summary Page</label></div>
+  </div>
+
+  <button type="button" class="collapsible" id="btnQuotas">Quotas (Optional)</button>
+  <div class="content" id="sectQuotas">
+    <p style="font-size:12px;font-style:italic;">Use EITHER Type OR Difficulty quotas. Difficulty quotas take priority.</p>
+    <h4 style="margin-bottom:5px;margin-top:15px;">Per-Type Quotas</h4>
+    <div id="type-quotas"></div>
+    <h4 style="margin-bottom:5px;margin-top:15px;">Per-Difficulty Quotas</h4>
+    <div id="diff-quotas"></div>
+  </div>
+
+  <div class="btn-grid">
+    <button id="btnPreview">Preview Count</button>
+    <button id="btnReset">Reset Filters</button>
+    <button id="btnStudent">Student Paper</button>
+    <button id="btnAnswer">Answer Key</button>
+    <button id="btnBoth" class="btn-full">Generate Both (one doc)</button>
+  </div>
+
+  <div id="status"></div>
+
+  <script>
+    // --- collapsibles ---
+    document.querySelectorAll('.collapsible').forEach(btn=>{
+      btn.addEventListener('click',()=>{
+        btn.classList.toggle('active');
+        const c = btn.nextElementSibling;
+        if(c.style.maxHeight){ c.style.maxHeight = null; }
+        else { c.style.maxHeight = c.scrollHeight + 'px'; }
+      });
+    });
+
+    // --- init from backend ---
+    google.script.run.withSuccessHandler(initSidebar).getSidebarData();
+
+    function initSidebar(data){
+      // Courses
+      const courseSel = document.getElementById('course'); courseSel.innerHTML='';
+      (data.courses||[]).forEach(c=>{
+        const o=document.createElement('option'); o.value=c; o.textContent=c; courseSel.appendChild(o);
+      });
+      // Checkboxes
+      fillCheckGrid('difficulties', data.difficulties||[]);
+      fillCheckGrid('types', data.types||[]);
+      fillCheckGrid('correct-status', data.correctStatuses||[]);
+      // Quotas
+      buildQuotaInputs('type-quotas', data.types||[]);
+      buildQuotaInputs('diff-quotas', data.difficulties||[]);
+      // Open Quotas by default
+      openSection('btnQuotas','sectQuotas');
+      // Listeners for highlight
+      attachActivityListeners();
+      updateActiveHighlights();
+      // Wire buttons
+      wireButtons();
+    }
+
+    // --- UI builders ---
+    function fillCheckGrid(containerId, items){
+      const div=document.getElementById(containerId); div.innerHTML='';
+      items.forEach(item=>{
+        const lbl=document.createElement('label');
+        const cb=document.createElement('input');
+        cb.type='checkbox'; cb.value=item;
+        lbl.appendChild(cb); lbl.appendChild(document.createTextNode(' '+item));
+        div.appendChild(lbl);
+      });
+    }
+    function buildQuotaInputs(containerId, items){
+      const div=document.getElementById(containerId); div.innerHTML='';
+      items.forEach(item=>{
+        const id = keyify(item)+'-quota';
+        const g=document.createElement('div'); g.className='form-group';
+        g.innerHTML=`<label>${item}</label><input type="number" id="${id}" min="0">`;
+        div.appendChild(g);
+      });
+    }
+    function openSection(btnId, sectId){
+      const btn=document.getElementById(btnId), sect=document.getElementById(sectId);
+      if(btn && sect){ btn.classList.add('active'); sect.style.maxHeight = sect.scrollHeight + 'px'; }
+    }
+
+    // --- highlight logic ---
+    function attachActivityListeners(){
+      document.querySelectorAll('input,select,textarea').forEach(el=>{
+        el.addEventListener('change', updateActiveHighlights);
+        el.addEventListener('input', updateActiveHighlights);
+      });
+    }
+    function updateActiveHighlights(){
+      document.querySelectorAll('.collapsible').forEach(btn=>{
+        const sect = btn.nextElementSibling;
+        const inputs = sect.querySelectorAll('input,select,textarea');
+        const active = Array.from(inputs).some(el=>{
+          if(el.type==='checkbox'||el.type==='radio') return el.checked;
+          return (el.value && el.value.trim()!=='');
+        });
+        if(active) btn.classList.add('active-filter'); else btn.classList.remove('active-filter');
+      });
+    }
+
+    // --- gather config for backend ---
+    function gatherConfig(mode){
+      const cfg={
+        mode:mode||'preview',
+        course:document.getElementById('course').value,
+        topicsRaw:document.getElementById('topics').value,
+        excludeTopicsRaw:document.getElementById('exclude-topics').value,
+        diffList:checkedValues('#difficulties'),
+        typeList:checkedValues('#types'),
+        corrList:checkedValues('#correct-status'),
+        myAnsList:splitList(document.getElementById('my-answer').value),
+        sourceRaw:document.getElementById('source').value,
+        excludeSourceRaw:document.getElementById('exclude-source').value,
+        searchText:document.getElementById('search-text').value,
+        practicedWithinDays:document.getElementById('practiced-within').value,
+        notPracticedDays:document.getElementById('not-practiced').value,
+        isPracticeEmptyStr:document.getElementById('is-practice-empty').checked?'true':'false',
+        examTitle:document.getElementById('exam-title').value,
+        examSubtitle:document.getElementById('exam-subtitle').value,
+        maxQ:document.getElementById('max-questions').value,
+        shuffleChoices:document.getElementById('shuffle').checked,
+        showTopicTag:document.getElementById('show-topic-tag').checked?'true':'false',
+        includeSummary:document.getElementById('include-summary').checked?'true':'false',
+        typeQuotas:{}, diffQuotas:{}
+      };
+      document.querySelectorAll('#type-quotas input').forEach(inp=>{
+        if(inp.value){ cfg.typeQuotas[keyifyFromId(inp.id)] = inp.value; }
+      });
+      document.querySelectorAll('#diff-quotas input').forEach(inp=>{
+        if(inp.value){ cfg.diffQuotas[keyifyFromId(inp.id)] = inp.value; }
+      });
+      return cfg;
+    }
+    function keyify(s){ return String(s).toLowerCase().replace(/[^a-z0-9]/g,''); }
+    function keyifyFromId(id){ return String(id).replace('-quota',''); }
+    function checkedValues(sel){ return Array.from(document.querySelectorAll(sel+' input[type=checkbox]:checked')).map(cb=>cb.value); }
+    function splitList(s){ return !s?[]:s.split(/[;|,]/).map(x=>x.trim()).filter(Boolean); }
+
+    // --- buttons wiring + handlers ---
+    function wireButtons(){
+      document.getElementById('btnPreview').addEventListener('click', previewCount);
+      document.getElementById('btnReset').addEventListener('click', resetFilters);
+      document.getElementById('btnStudent').addEventListener('click', ()=>generateExam('studentOnly'));
+      document.getElementById('btnAnswer').addEventListener('click', ()=>generateExam('answerOnly'));
+      document.getElementById('btnBoth').addEventListener('click', ()=>generateExam('bothOneDoc'));
+    }
+
+    function setStatus(msg, warn){
+      const el=document.getElementById('status');
+      el.textContent = msg || '';
+      if(warn) el.classList.add('warn'); else el.classList.remove('warn');
+    }
+
+    function previewCount(){
+      setStatus('Counting matches…');
+      const cfg=gatherConfig('preview');
+      google.script.run.withSuccessHandler(res=>{
+        setStatus(res);
+      }).withFailureHandler(err=>{
+        setStatus('Error: '+err.message, true);
+      }).previewCountFromUI(cfg);
+    }
+
+    function resetFilters(){
+      // Core
+      const courseSel=document.getElementById('course'); if(courseSel.options.length>0) courseSel.selectedIndex=0;
+      document.getElementById('topics').value='';
+      document.getElementById('exclude-topics').value='';
+      // Content
+      ['difficulties','types','correct-status'].forEach(id=>{
+        document.querySelectorAll('#'+id+' input[type=checkbox]').forEach(cb=>cb.checked=false);
+      });
+      // Advanced
+      document.getElementById('my-answer').value='';
+      document.getElementById('source').value='';
+      document.getElementById('exclude-source').value='';
+      document.getElementById('search-text').value='';
+      // Dates
+      document.getElementById('practiced-within').value='';
+      document.getElementById('not-practiced').value='';
+      document.getElementById('is-practice-empty').checked=false;
+      // Output
+      document.getElementById('exam-title').value='';
+      document.getElementById('exam-subtitle').value='';
+      document.getElementById('max-questions').value='';
+      document.getElementById('shuffle').checked=true;
+      document.getElementById('show-topic-tag').checked=true;
+      document.getElementById('include-summary').checked=false;
+      // Quotas
+      document.querySelectorAll('#type-quotas input,#diff-quotas input').forEach(i=>i.value='');
+      updateActiveHighlights();
+      setStatus('Filters were reset. Click Preview Count to see matches.');
+    }
+
+    function generateExam(mode){
+      setStatus('Generating… please wait.');
+      const cfg=gatherConfig(mode);
+      google.script.run
+        .withSuccessHandler(msg=>setStatus(msg))
+        .withFailureHandler(err=>setStatus('Error: '+err.message, true))
+        .buildExamFromUI(cfg);
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <style>
+      body { font-family: Arial, sans-serif; padding: 14px; }
+      label { font-weight: 600; display:block; margin-top:12px; }
+      input[type=text], input[type=password] { width: 100%; padding:8px; border:1px solid #ccc; border-radius:6px; }
+      table { width:100%; border-collapse: collapse; margin-top:10px; }
+      th, td { border:1px solid #ddd; padding:8px; font-size:13px; }
+      th { background:#f1f3f4; text-align:left; }
+      .row { display:grid; grid-template-columns: 1fr; gap:10px; }
+      .btns { margin-top: 16px; display:flex; gap:10px; }
+      button { background:#1a73e8; color:#fff; border:none; padding:10px 14px; border-radius:8px; cursor:pointer; font-weight:700; }
+      button.secondary { background:#5f6368; }
+      .mini { padding:6px 10px; font-weight:600; }
+      .right { float:right; }
+      small { color:#5f6368; display:block; margin-top:4px; }
+      .hint { color:#1967d2; font-size:12px; margin-top:6px; }
+    </style>
+  </head>
+  <body>
+    <h3>Notion Sync • Configuration</h3>
+    <div class="row">
+      <label for="token">Notion Internal Integration Token</label>
+      <input id="token" type="password" placeholder="secret_...">
+      <small>Create in Notion: Settings → Connections → Develop or manage integrations → New integration.</small>
+    </div>
+
+    <h4 style="margin-top:16px;">Courses ↔ Database IDs</h4>
+    <button class="mini right" onclick="addRow()">+ Add Course</button>
+    <table id="mapTable">
+      <thead><tr><th style="width:45%">Course Name (e.g., BIO 1130)</th><th>Database ID</th><th style="width:70px">Actions</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <small class="hint">Course name is what appears in the “Course” column in Sheets. You can add as many as you like.</small>
+
+    <div class="btns">
+      <button onclick="save()">Save</button>
+      <button class="secondary" onclick="google.script.host.close()">Close</button>
+    </div>
+
+    <script>
+      function hydrate(cfg){
+        if(!cfg) return;
+        // we won't echo back the token for safety
+        const map = cfg.dbMap || {};
+        const tbody = document.querySelector('#mapTable tbody');
+        tbody.innerHTML='';
+        Object.keys(map).forEach(name => tbody.appendChild(rowEl(name, map[name])));
+        if (!Object.keys(map).length){
+          tbody.appendChild(rowEl('BIO 1130',''));
+          tbody.appendChild(rowEl('ANP 1111',''));
+          tbody.appendChild(rowEl('PSY 1101',''));
+        }
+      }
+      function rowEl(name, id){
+        const tr = document.createElement('tr');
+        tr.innerHTML = '<td><input class="name" value="'+(name||'')+'" placeholder="BIO 1130"></td>' +
+                       '<td><input class="dbid" value="'+(id||'')+'" placeholder="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"></td>' +
+                       '<td><button class="mini" onclick="this.closest(\\'tr\\').remove()">Delete</button></td>';
+        return tr;
+      }
+      function addRow(){ document.querySelector('#mapTable tbody').appendChild(rowEl('','')); }
+      function save(){
+        const token = (document.getElementById('token').value||'').trim();
+        const rows = Array.from(document.querySelectorAll('#mapTable tbody tr'));
+        const map = {};
+        rows.forEach(r=>{
+          const name = (r.querySelector('.name').value||'').trim();
+          const dbid = (r.querySelector('.dbid').value||'').trim();
+          if (name && dbid) map[name] = dbid;
+        });
+        google.script.run.withSuccessHandler(function(msg){
+          alert(msg); google.script.host.close();
+        }).saveNotionConfig({ token, dbMap: map });
+      }
+      google.script.run.withSuccessHandler(hydrate).readNotionConfig();
+    </script>
+  </body>
+</html>
