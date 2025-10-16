@@ -17,6 +17,7 @@
       .right { float:right; }
       small { color:#5f6368; display:block; margin-top:4px; }
       .hint { color:#1967d2; font-size:12px; margin-top:6px; }
+      .token-actions { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:6px; }
     </style>
   </head>
   <body>
@@ -24,11 +25,15 @@
     <div class="row">
       <label for="token">Notion Internal Integration Token</label>
       <input id="token" type="password" placeholder="secret_...">
+      <div class="token-actions">
+        <small id="tokenStatus">Token not yet loaded.</small>
+        <button class="mini secondary" type="button" onclick="clearToken()">Clear Token</button>
+      </div>
       <small>Create in Notion: Settings → Connections → Develop or manage integrations → New integration.</small>
     </div>
 
     <h4 style="margin-top:16px;">Courses ↔ Database IDs</h4>
-    <button class="mini right" onclick="addRow()">+ Add Course</button>
+    <button class="mini right" type="button" onclick="addRow()">+ Add Course</button>
     <table id="mapTable">
       <thead><tr><th style="width:45%">Course Name (e.g., BIO 1130)</th><th>Database ID</th><th style="width:70px">Actions</th></tr></thead>
       <tbody></tbody>
@@ -36,11 +41,16 @@
     <small class="hint">Course name is what appears in the “Course” column in Sheets. You can add as many as you like.</small>
 
     <div class="btns">
-      <button onclick="save()">Save</button>
-      <button class="secondary" onclick="google.script.host.close()">Close</button>
+      <button type="button" onclick="save()">Save</button>
+      <button type="button" class="secondary" onclick="google.script.host.close()">Close</button>
     </div>
 
     <script>
+      function setTokenStatus(hasToken){
+        const el = document.getElementById('tokenStatus');
+        if (!el) return;
+        el.textContent = hasToken ? 'Token stored securely (not shown).' : 'No token stored.';
+      }
       function hydrate(cfg){
         if(!cfg) return;
         // we won't echo back the token for safety
@@ -53,17 +63,17 @@
           tbody.appendChild(rowEl('ANP 1111',''));
           tbody.appendChild(rowEl('PSY 1101',''));
         }
+        setTokenStatus(Boolean(cfg.hasToken));
       }
       function rowEl(name, id){
         const tr = document.createElement('tr');
         tr.innerHTML = '<td><input class="name" value="'+(name||'')+'" placeholder="BIO 1130"></td>' +
                        '<td><input class="dbid" value="'+(id||'')+'" placeholder="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"></td>' +
-                       '<td><button class="mini" onclick="this.closest(\\'tr\\').remove()">Delete</button></td>';
+                       '<td><button class="mini" type="button" onclick="this.closest(\\'tr\\').remove()">Delete</button></td>';
         return tr;
       }
       function addRow(){ document.querySelector('#mapTable tbody').appendChild(rowEl('','')); }
-      function save(){
-        const token = (document.getElementById('token').value||'').trim();
+      function gatherMap(){
         const rows = Array.from(document.querySelectorAll('#mapTable tbody tr'));
         const map = {};
         rows.forEach(r=>{
@@ -71,9 +81,26 @@
           const dbid = (r.querySelector('.dbid').value||'').trim();
           if (name && dbid) map[name] = dbid;
         });
+        return map;
+      }
+      function save(){
+        const tokenValue = (document.getElementById('token').value||'').trim();
+        const payload = { dbMap: gatherMap() };
+        if (tokenValue) {
+          payload.token = tokenValue;
+        }
         google.script.run.withSuccessHandler(function(msg){
           alert(msg); google.script.host.close();
-        }).saveNotionConfig({ token, dbMap: map });
+        }).saveNotionConfig(payload);
+      }
+      function clearToken(){
+        if (!confirm('Remove the stored Notion token?')) return;
+        const payload = { dbMap: gatherMap(), clearToken: true };
+        google.script.run.withSuccessHandler(function(msg){
+          alert(msg);
+          document.getElementById('token').value='';
+          setTokenStatus(false);
+        }).saveNotionConfig(payload);
       }
       google.script.run.withSuccessHandler(hydrate).readNotionConfig();
     </script>

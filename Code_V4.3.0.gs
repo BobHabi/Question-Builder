@@ -26,6 +26,9 @@ const PROP = PropertiesService.getScriptProperties();
 const NOTION_API_BASE = 'https://api.notion.com/v1';
 const NOTION_VERSION  = '2022-06-28'; // stable & widely supported
 const DBMAP_KEY       = 'NOTION_DB_MAP'; // JSON: { "BIO 1130":"dbid", "ANP 1111":"dbid", ... }
+const NOTION_RATE_LIMIT_MS = 400; // keep comfortably under Notion's 3 req/sec guidance
+
+const notionDbMetadataCache = {};
 
 // =========================
 // Menus
@@ -255,6 +258,11 @@ function filterAndSelect(config, countsOnly) {
   const cleanSearchText   = clean(searchText);
   const showTopicAtEnd    = (String(showTopicTag) === 'true');
 
+  const diffSet = new Set(diffList.map(v => toLower(v)));
+  const typeSet = new Set(typeList.map(v => toLower(v)));
+  const corrSet = new Set(corrList.map(v => toLower(v)));
+  const myAnsSet = new Set(myAnsList.map(v => clean(v)));
+
   const practicedWithinDate = practicedWithinDays ? daysAgo(toIntOrZero(practicedWithinDays)) : null;
   const notPracticedDate    = notPracticedDays ? daysAgo(toIntOrZero(notPracticedDays)) : null;
 
@@ -286,16 +294,16 @@ function filterAndSelect(config, countsOnly) {
     if (excludeTopicsList.length > 0 && cellContainsAny(rowTopicLower, excludeTopicsList)) continue;
 
     const rowDiffLower = toLower(row[cDiff]);
-    if (diffList.length > 0 && !diffList.map(toLower).includes(rowDiffLower)) continue;
+    if (diffSet.size > 0 && !diffSet.has(rowDiffLower)) continue;
 
     const rowTypeLower = toLower(row[cT]);
-    if (typeList.length > 0 && !typeList.map(toLower).includes(rowTypeLower)) continue;
+    if (typeSet.size > 0 && !typeSet.has(rowTypeLower)) continue;
 
     const rowCorrectStatusLower = (cCI > -1) ? toLower(row[cCI]) : '';
-    if (corrList.length > 0 && !corrList.map(toLower).includes(rowCorrectStatusLower)) continue;
+    if (corrSet.size > 0 && !corrSet.has(rowCorrectStatusLower)) continue;
 
     const rowMyAns = (cMyAns > -1) ? clean(row[cMyAns]) : '';
-    if (myAnsList.length > 0 && !myAnsList.includes(rowMyAns)) continue;
+    if (myAnsSet.size > 0 && !myAnsSet.has(rowMyAns)) continue;
 
     const rowSourceLower = (cSource > -1) ? toLower(row[cSource]) : '';
     if (sourceList.length > 0 && !sourceList.some(s => rowSourceLower.includes(s))) continue;
@@ -544,6 +552,36 @@ function openNotionConfig(){
   SpreadsheetApp.getUi().showModalDialog(html, 'Notion Sync • Configuration');
 }
 
+function readNotionConfig(){
+  const map = getDbMap();
+  return {
+    hasToken: Boolean(PROP.getProperty('NOTION_TOKEN')),
+    dbMap: map
+  };
+}
+
+function saveNotionConfig(payload){
+  if (!payload || typeof payload !== 'object') {
+    throw new Error('Invalid configuration payload.');
+  }
+
+  if (payload.dbMap) {
+    setDbMap(payload.dbMap);
+  }
+
+  if (payload.clearToken) {
+    PROP.deleteProperty('NOTION_TOKEN');
+  } else if (Object.prototype.hasOwnProperty.call(payload, 'token')) {
+    const token = clean(payload.token);
+    if (!token) {
+      throw new Error('Token cannot be empty. Use "Clear Token" if you intend to remove it.');
+    }
+    PROP.setProperty('NOTION_TOKEN', token);
+  }
+
+  return 'Configuration saved successfully.';
+}
+
 // NEW: Sync Down Filters dialog (inline HTML, no extra file)
 function openSyncDownFilters(){
   const dbMap = getDbMap();
@@ -619,41 +657,71 @@ function htmlEscape(s){ return String(s||'').replace(/[&<>"']/g, m=>({ '&':'&amp
 function runSyncDownWithFilters(filters){
   const cfg = requireNotionConfig();
   const dbMap = getDbMap();
-  if (!Object.keys(dbMap).length) throw new Error('No courses configured in Notion Sync → Configure…');
+  const courseNames = Object.keys(dbMap);
+  if (!courseNames.length) throw new Error('No courses configured in Notion Sync → Configure…');
 
   const importSheet = getSheet(SHEET_IMPORT); if(!importSheet) throw new Error('Import sheet missing.');
   ensureCanonicalHeaders(importSheet);
 
-  // Determine which courses to pull
   const targets = [];
   if (filters.course && filters.course !== '__ALL__') {
     const dbid = dbMap[filters.course];
     if (dbid) targets.push({ name: filters.course, id: dbid });
   } else {
-    Object.keys(dbMap).forEach(name => targets.push({ name, id: dbMap[name] }));
+    courseNames.forEach(name => targets.push({ name, id: dbMap[name] }));
   }
 
-  const headerRow = importSheet.getRange(1,1,1,importSheet.getLastColumn()).getValues()[0];
-  const headersLower = headerRow.map(h=>toLower(h));
-  const cRef = headersLower.indexOf(toLower(REF_HEADER));
-  const importData = importSheet.getDataRange().getValues();
-  const mapRow = new Map(importData.slice(1).map((r,i)=>[clean(r[cRef]), i+2]));
+  if (!targets.length) {
+    throw new Error('No matching courses found for the selected filter.');
+  }
 
-  let updates=0, adds=0, fetched=0;
+  const numCols = CANON_HEADERS.length;
+  const lastRowWithData = importSheet.getLastRow();
+  const rowsToRead = Math.max(1, lastRowWithData);
+  const importData = importSheet.getRange(1, 1, rowsToRead, numCols).getValues();
+  const existingRows = importData.length > 1 ? importData.slice(1) : [];
+  const headersLower = CANON_HEADERS.map(h => toLower(h));
+  const cRef = headersLower.indexOf(toLower(REF_HEADER));
+  if (cRef === -1) {
+    throw new Error('Import sheet is missing the Ref ID column.');
+  }
+  const existingRefToIndex = new Map();
+  existingRows.forEach((row, idx) => {
+    const ref = clean(row[cRef]);
+    if (ref) existingRefToIndex.set(ref, idx);
+  });
+
+  const newRows = [];
+  const seenNewRefs = new Set();
+  let updates = 0, adds = 0, fetched = 0;
 
   targets.forEach(t => {
-    const rows = fetchNotionDbAsRowsFiltered(t.id, t.name, filters);
+    const rows = fetchNotionDbAsRowsFiltered(t.id, t.name, filters, cfg);
     fetched += rows.length;
-    rows.forEach(r=>{
-      const ref = clean(r[cRef]); if(!ref) return;
-      if (mapRow.has(ref)) {
-        importSheet.getRange(mapRow.get(ref), 1, 1, r.length).setValues([r]); updates++;
-      } else {
-        importSheet.appendRow(r); adds++;
+    rows.forEach(r => {
+      const ref = clean(r[cRef]);
+      if (!ref) return;
+      if (existingRefToIndex.has(ref)) {
+        existingRows[existingRefToIndex.get(ref)] = r;
+        updates++;
+      } else if (!seenNewRefs.has(ref)) {
+        newRows.push(r);
+        seenNewRefs.add(ref);
+        adds++;
       }
     });
-    Utilities.sleep(120);
   });
+
+  if (existingRows.length) {
+    importSheet.getRange(2, 1, existingRows.length, numCols).setValues(existingRows);
+  }
+
+  if (newRows.length) {
+    const lastRowBeforeInsert = importSheet.getLastRow();
+    const anchorRow = Math.max(1, lastRowBeforeInsert);
+    importSheet.insertRowsAfter(anchorRow, newRows.length);
+    importSheet.getRange(anchorRow + 1, 1, newRows.length, numCols).setValues(newRows);
+  }
 
   return `Sync Down complete.\nFetched: ${fetched}\nUpdated in Import: ${updates}\nAdded to Import: ${adds}`;
 }
@@ -687,17 +755,18 @@ function notionSyncUp(){
   const importSheet = getSheet(SHEET_IMPORT); if(!importSheet) throw new Error('Import sheet missing.');
   const data = importSheet.getDataRange().getValues(); if(data.length < 2){ SpreadsheetApp.getUi().alert('Import is empty.'); return; }
   const headers = data[0]; const rows = data.slice(1);
+  const dbMap = getDbMap();
 
   let created=0, updated=0, skipped=0, errors=0;
   rows.forEach(row=>{
     const rec = rowToRecord(headers, row);
     if (!rec.RefID || !rec.Course) { skipped++; return; }
-    const dbId = courseToDbId(rec.Course);
+    const dbId = courseToDbId(rec.Course, dbMap);
     if (!dbId) { skipped++; return; }
     try {
-      const pageId = findPageIdByRefId(dbId, rec.RefID, requireNotionConfig());
-      if (pageId) { updateNotionPage(pageId, rec, requireNotionConfig()); updated++; }
-      else { createNotionPage(dbId, rec, requireNotionConfig()); created++; }
+      const pageId = findPageIdByRefId(dbId, rec.RefID, cfg);
+      if (pageId) { updateNotionPage(pageId, rec, cfg); updated++; }
+      else { createNotionPage(dbId, rec, cfg); created++; }
     } catch (e) { errors++; Logger.log(e); }
   });
 
@@ -715,11 +784,21 @@ function requireNotionConfig(){
 
 function getDbMap(){
   const raw = PROP.getProperty(DBMAP_KEY) || '{}';
-  try { const m = JSON.parse(raw); if (m && typeof m === 'object') return m; } catch(e){}
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object') {
+      return sanitizeCourseMap(parsed);
+    }
+  } catch(e){}
   return {};
 }
 function setDbMap(obj){
-  PROP.setProperty(DBMAP_KEY, JSON.stringify(obj || {}));
+  const sanitized = sanitizeCourseMap(obj);
+  PROP.setProperty(DBMAP_KEY, JSON.stringify(sanitized));
+  const validDbIds = new Set(Object.values(sanitized));
+  Object.keys(notionDbMetadataCache).forEach(dbId => {
+    if (!validDbIds.has(dbId)) delete notionDbMetadataCache[dbId];
+  });
 }
 
 function notionRequest(path, method, payload, cfg){
@@ -731,76 +810,201 @@ function notionRequest(path, method, payload, cfg){
     muteHttpExceptions: true
   };
   if (payload) options.payload = JSON.stringify(payload);
-  const resp = UrlFetchApp.fetch(url, options);
-  const code = resp.getResponseCode();
-  if (code >= 200 && code < 300) return JSON.parse(resp.getContentText());
-  throw new Error('Notion API error '+code+': '+resp.getContentText());
+
+  const maxAttempts = 5;
+  let attempt = 0;
+  let delay = NOTION_RATE_LIMIT_MS;
+  let lastError = null;
+
+  while (attempt < maxAttempts) {
+    attempt++;
+    try {
+      const resp = UrlFetchApp.fetch(url, options);
+      const code = resp.getResponseCode();
+      const body = resp.getContentText();
+      if (code >= 200 && code < 300) {
+        const parsed = body ? JSON.parse(body) : {};
+        Utilities.sleep(NOTION_RATE_LIMIT_MS);
+        return parsed;
+      }
+
+      const errMsg = 'Notion API error ' + code + ': ' + body;
+      if (code === 429 || code >= 500) {
+        lastError = new Error(errMsg);
+      } else {
+        throw new Error(errMsg);
+      }
+    } catch (e) {
+      lastError = e;
+    }
+
+    if (attempt >= maxAttempts) break;
+    Utilities.sleep(delay);
+    delay = Math.min(delay * 2, 5000);
+  }
+
+  throw lastError || new Error('Unknown Notion API error.');
+}
+
+function describeNotionDatabase(dbId, cfg){
+  if (!dbId) return null;
+  if (!notionDbMetadataCache[dbId]) {
+    notionDbMetadataCache[dbId] = notionRequest('/databases/' + dbId, 'get', null, cfg);
+  }
+  return notionDbMetadataCache[dbId];
 }
 
 // Filtered fetch
-function fetchNotionDbAsRowsFiltered(dbId, courseName, filters){
-  const rows=[]; let cursor=null;
-  const apiFilter = buildNotionApiFilter(filters);
-  do{
+function fetchNotionDbAsRowsFiltered(dbId, courseName, filters, cfg){
+  const rows = [];
+  let cursor = null;
+  const config = cfg || requireNotionConfig();
+  const dbMeta = describeNotionDatabase(dbId, config);
+  const filterPlan = buildNotionFilterPlan(filters, dbMeta);
+
+  do {
     const payload = { page_size: 100 };
-    if (apiFilter) payload.filter = apiFilter;
+    if (filterPlan.notion) payload.filter = filterPlan.notion;
     if (cursor) payload.start_cursor = cursor;
-    const res = notionRequest('/databases/'+dbId+'/query', 'post', payload, requireNotionConfig());
-    (res.results||[]).forEach(page=>{
+    const res = notionRequest('/databases/' + dbId + '/query', 'post', payload, config);
+    (res.results || []).forEach(page => {
       const props = page.properties || {};
       const rec = notionPropsToRecord(props);
       rec.Course = courseName;
+      if (!passesClientFilters(rec, filterPlan.clientFilters)) return;
       rows.push(recordToRow(rec));
     });
     cursor = res.has_more ? res.next_cursor : null;
-    Utilities.sleep(80);
-  } while(cursor);
+  } while (cursor);
 
-  // Client-side additional filters (Ref ID range)
-  const refStart = clean(filters.refStart);
-  const refEnd = clean(filters.refEnd);
-  if (refStart || refEnd){
-    const idx = CANON_HEADERS.map(h=>toLower(h)).indexOf(toLower(REF_HEADER));
-    const inRange = r => {
-      const rid = clean(r[idx]);
-      if (refStart && rid < refStart) return false;
-      if (refEnd && rid > refEnd) return false;
-      return true;
-    };
-    return rows.filter(inRange);
-  }
-  return rows;
+  return applyRefRangeFilter(rows, filters);
 }
 
-// Build Notion API filter object from UI filters
-function buildNotionApiFilter(filters){
+function passesClientFilters(rec, fns){
+  if (!fns || !fns.length) return true;
+  for (let i = 0; i < fns.length; i++) {
+    if (!fns[i](rec)) return false;
+  }
+  return true;
+}
+
+function applyRefRangeFilter(rows, filters){
+  const refStart = clean(filters.refStart);
+  const refEnd = clean(filters.refEnd);
+  if (!refStart && !refEnd) return rows;
+
+  const idx = CANON_HEADERS.map(h => toLower(h)).indexOf(toLower(REF_HEADER));
+  if (idx === -1) return rows;
+
+  return rows.filter(r => {
+    const rid = clean(r[idx]);
+    if (refStart && rid < refStart) return false;
+    if (refEnd && rid > refEnd) return false;
+    return true;
+  });
+}
+
+function buildNotionFilterPlan(filters, dbMeta){
   const clauses = [];
+  const clientFilters = [];
 
   const refPrefix = clean(filters.refPrefix);
-  if (refPrefix){
+  if (refPrefix) {
     clauses.push({ property: 'Ref ID', rich_text: { starts_with: refPrefix } });
   }
 
   const topics = parseList(filters.topics);
-  if (topics.length){
-    const ors = topics.map(tok => ({ property: 'Topic/Chapter', rich_text: { contains: tok } }));
-    clauses.push({ or: ors });
+  if (topics.length) {
+    const topicMeta = lookupPropMeta(dbMeta, ['Topic/Chapter','Topic / Chapter','Topic- Chapter','Topic','Chapter','Chapter/Topic']);
+    const topicOrs = [];
+    if (topicMeta) {
+      topics.forEach(tok => {
+        if (!tok) return;
+        if (topicMeta.type === 'select') {
+          topicOrs.push({ property: topicMeta.name, select: { equals: tok } });
+        } else if (topicMeta.type === 'multi_select') {
+          topicOrs.push({ property: topicMeta.name, multi_select: { contains: tok } });
+        } else {
+          topicOrs.push({ property: topicMeta.name, rich_text: { contains: tok } });
+        }
+      });
+    }
+    if (topicOrs.length) {
+      clauses.push({ or: topicOrs });
+    } else {
+      const lowered = topics.map(t => t.toLowerCase());
+      clientFilters.push(rec => {
+        const hay = toLower(rec.Topic);
+        if (!hay) return false;
+        return lowered.some(tok => hay.indexOf(tok) > -1);
+      });
+    }
   }
 
   const tags = parseList(filters.tags);
-  if (tags.length){
-    const ors = tags.map(t => ({ property: 'Tags', multi_select: { contains: t } }));
-    clauses.push({ or: ors });
+  if (tags.length) {
+    const tagsMeta = lookupPropMeta(dbMeta, ['Tags']);
+    const tagOrs = [];
+    if (tagsMeta) {
+      tags.forEach(t => {
+        if (!t) return;
+        if (tagsMeta.type === 'multi_select') {
+          tagOrs.push({ property: tagsMeta.name, multi_select: { contains: t } });
+        } else if (tagsMeta.type === 'select') {
+          tagOrs.push({ property: tagsMeta.name, select: { equals: t } });
+        }
+      });
+    }
+    if (tagOrs.length) {
+      clauses.push({ or: tagOrs });
+    } else {
+      const loweredTags = tags.map(t => t.toLowerCase());
+      clientFilters.push(rec => {
+        const hay = toLower(rec.Tags);
+        if (!hay) return false;
+        const parts = hay.split(/[,;]+/).map(x => x.trim()).filter(Boolean);
+        const partSet = new Set(parts);
+        return loweredTags.some(tok => partSet.has(tok));
+      });
+    }
   }
 
-  const lastEdited = clean(filters.lastEdited);
-  if (lastEdited){
-    clauses.push({ timestamp: 'last_edited_time', last_edited_time: { on_or_after: lastEdited } });
+  const lastEditedRaw = clean(filters.lastEdited);
+  if (lastEditedRaw) {
+    const iso = formatDateForNotion(lastEditedRaw);
+    if (!iso || !isValidIsoDateString(iso)) {
+      throw new Error('Last Edited Since must be a valid date (YYYY-MM-DD or MM/DD/YYYY).');
+    }
+    clauses.push({ timestamp: 'last_edited_time', last_edited_time: { on_or_after: iso } });
   }
 
-  if (!clauses.length) return null;
-  if (clauses.length === 1) return clauses[0];
-  return { and: clauses };
+  let notion = null;
+  if (clauses.length === 1) notion = clauses[0];
+  else if (clauses.length > 1) notion = { and: clauses };
+
+  return { notion, clientFilters };
+}
+
+function lookupPropMeta(dbMeta, candidates){
+  if (!dbMeta || !dbMeta.properties) return null;
+  const props = dbMeta.properties;
+  for (const key in props) {
+    const norm = normalizeName(key);
+    for (let i = 0; i < candidates.length; i++) {
+      if (norm === normalizeName(candidates[i])) {
+        return { name: key, type: props[key].type };
+      }
+    }
+  }
+  return null;
+}
+
+function isValidIsoDateString(value){
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const date = new Date(value + 'T00:00:00Z');
+  if (isNaN(date.getTime())) return false;
+  const [y, m, d] = value.split('-').map(Number);
+  return date.getUTCFullYear() === y && (date.getUTCMonth() + 1) === m && date.getUTCDate() === d;
 }
 
 function findPageIdByRefId(dbId, refId, cfg){
@@ -993,13 +1197,45 @@ function formatDateFromNotion(iso){
   }catch(e){ return ''; }
 }
 
-function courseToDbId(course){
-  const map = getDbMap();
-  const exact = map[clean(course)];
-  if (exact) return exact;
-  const key = clean(course).split(' ')[0].toUpperCase();
-  for (const name in map){
-    if (name.toUpperCase().startsWith(key)) return map[name];
+function sanitizeCourseMap(input){
+  const out = {};
+  const seen = new Set();
+  const source = input && typeof input === 'object' ? input : {};
+  Object.keys(source).forEach(key => {
+    const name = clean(key);
+    const dbId = clean(source[key]);
+    if (!name || !dbId) return;
+    const norm = name.toLowerCase();
+    if (seen.has(norm)) return;
+    seen.add(norm);
+    out[name] = dbId;
+  });
+  return out;
+}
+
+function courseToDbId(course, mapOverride){
+  const map = mapOverride || getDbMap();
+  if (!course) return null;
+  const cleaned = clean(course);
+  if (!cleaned) return null;
+  const names = Object.keys(map || {});
+  if (!names.length) return null;
+
+  if (map.hasOwnProperty(cleaned)) {
+    return map[cleaned];
+  }
+
+  const lower = cleaned.toLowerCase();
+  const ciExact = names.find(name => name.toLowerCase() === lower);
+  if (ciExact) {
+    return map[ciExact];
+  }
+
+  const prefix = cleaned.split(' ')[0].toLowerCase();
+  if (!prefix) return null;
+  const matches = names.filter(name => name.toLowerCase().startsWith(prefix));
+  if (matches.length === 1) {
+    return map[matches[0]];
   }
   return null;
 }
@@ -1036,7 +1272,6 @@ function indexNotionRefs(dbId, cfg){
       if (rid) refs.add(rid);
     });
     cursor = res.has_more ? res.next_cursor : null;
-    Utilities.sleep(80);
   } while(cursor);
   return refs;
 }
@@ -1080,7 +1315,8 @@ function styleParagraph(p, opts){
     if(opts.bold != null) t.setBold(opts.bold);
     if(opts.italic != null) t.setItalic(opts.italic);
     if(opts.size != null) t.setFontSize(opts.size);
-    if(opts.family) t.setFontFamily(opts.family);
+    const family = opts.fontFamily || opts.family;
+    if(family) t.setFontFamily(family);
   }
   if(opts.center && has(p.setAlignment)) p.setAlignment(DocumentApp.HorizontalAlignment.CENTER);
   if(opts.lineSpacing && has(p.setLineSpacing)) p.setLineSpacing(opts.lineSpacing);
