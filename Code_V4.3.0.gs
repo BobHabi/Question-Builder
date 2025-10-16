@@ -548,8 +548,29 @@ function setupLastPracticedColumn(){
 // Notion Sync: UI wiring
 // =========================
 function openNotionConfig(){
-  const html = HtmlService.createHtmlOutputFromFile('NotionConfig').setWidth(520).setHeight(520);
-  SpreadsheetApp.getUi().showModalDialog(html, 'Notion Sync - Configuration');
+  const ui = SpreadsheetApp.getUi();
+  const htmlFileCandidates = ['NotionConfig_V4.3.0', 'NotionConfig'];
+  let html = null;
+  let lastError = null;
+
+  for (let i = 0; i < htmlFileCandidates.length; i++){
+    try {
+      html = HtmlService.createHtmlOutputFromFile(htmlFileCandidates[i]);
+      break;
+    } catch (err) {
+      lastError = err;
+    }
+  }
+
+  if (!html){
+    if (lastError){
+      throw lastError;
+    }
+    throw new Error('Notion configuration dialog HTML file not found.');
+  }
+
+  html.setWidth(520).setHeight(520);
+  ui.showModalDialog(html, 'Notion Sync - Configuration');
 }
 
 function readNotionConfig(){

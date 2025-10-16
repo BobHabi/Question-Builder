@@ -15,6 +15,7 @@
       button.secondary { background:#5f6368; }
       .mini { padding:6px 10px; font-weight:600; }
       .right { float:right; }
+      button.disabled { opacity:0.6; cursor:default; }
       small { color:#5f6368; display:block; margin-top:4px; }
       .hint { color:#1967d2; font-size:12px; margin-top:6px; }
       .token-actions { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:6px; }
@@ -27,82 +28,200 @@
       <input id="token" type="password" placeholder="secret_...">
       <div class="token-actions">
         <small id="tokenStatus">Token not yet loaded.</small>
-        <button class="mini secondary" type="button" onclick="clearToken()">Clear Token</button>
+        <button id="clearTokenBtn" class="mini secondary" type="button">Clear Token</button>
       </div>
       <small>Create in Notion: Settings -> Connections -> Develop or manage integrations -> New integration.</small>
     </div>
 
     <h4 style="margin-top:16px;">Courses <-> Database IDs</h4>
-    <button class="mini right" type="button" onclick="addRow()">+ Add Course</button>
+    <button id="addCourseBtn" class="mini right" type="button">+ Add Course</button>
     <table id="mapTable">
       <thead><tr><th style="width:45%">Course Name (e.g., BIO 1130)</th><th>Database ID</th><th style="width:70px">Actions</th></tr></thead>
       <tbody></tbody>
     </table>
     <small class="hint">Course name is what appears in the "Course" column in Sheets. You can add as many as you like.</small>
 
+    <div id="message" role="alert" style="display:none; margin-top:10px; color:#d93025; font-size:12px;"></div>
+
     <div class="btns">
-      <button type="button" onclick="save()">Save</button>
-      <button type="button" class="secondary" onclick="google.script.host.close()">Close</button>
+      <button id="saveBtn" type="button">Save</button>
+      <button id="closeBtn" type="button" class="secondary">Close</button>
     </div>
 
     <script>
-      function setTokenStatus(hasToken){
-        const el = document.getElementById('tokenStatus');
-        if (!el) return;
-        el.textContent = hasToken ? 'Token stored securely (not shown).' : 'No token stored.';
-      }
-      function hydrate(cfg){
-        if(!cfg) return;
-        // we won't echo back the token for safety
-        const map = cfg.dbMap || {};
+      (function(){
         const tbody = document.querySelector('#mapTable tbody');
-        tbody.innerHTML='';
-        Object.keys(map).forEach(name => tbody.appendChild(rowEl(name, map[name])));
-        if (!Object.keys(map).length){
-          tbody.appendChild(rowEl('BIO 1130',''));
-          tbody.appendChild(rowEl('ANP 1111',''));
-          tbody.appendChild(rowEl('PSY 1101',''));
+        const addBtn = document.getElementById('addCourseBtn');
+        const saveBtn = document.getElementById('saveBtn');
+        const closeBtn = document.getElementById('closeBtn');
+        const clearBtn = document.getElementById('clearTokenBtn');
+        const message = document.getElementById('message');
+
+        function setMessage(text, isError){
+          if (!message) return;
+          if (!text){
+            message.style.display='none';
+            message.textContent='';
+            return;
+          }
+          message.style.display='block';
+          message.style.color = isError ? '#d93025' : '#188038';
+          message.textContent = text;
         }
-        setTokenStatus(Boolean(cfg.hasToken));
-      }
-      function rowEl(name, id){
-        const tr = document.createElement('tr');
-        tr.innerHTML = '<td><input class="name" value="'+(name||'')+'" placeholder="BIO 1130"></td>' +
-                       '<td><input class="dbid" value="'+(id||'')+'" placeholder="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"></td>' +
-                       '<td><button class="mini" type="button" onclick="this.closest(\\'tr\\').remove()">Delete</button></td>';
-        return tr;
-      }
-      function addRow(){ document.querySelector('#mapTable tbody').appendChild(rowEl('','')); }
-      function gatherMap(){
-        const rows = Array.from(document.querySelectorAll('#mapTable tbody tr'));
-        const map = {};
-        rows.forEach(r=>{
-          const name = (r.querySelector('.name').value||'').trim();
-          const dbid = (r.querySelector('.dbid').value||'').trim();
-          if (name && dbid) map[name] = dbid;
-        });
-        return map;
-      }
-      function save(){
-        const tokenValue = (document.getElementById('token').value||'').trim();
-        const payload = { dbMap: gatherMap() };
-        if (tokenValue) {
-          payload.token = tokenValue;
+
+        function setBusy(isBusy){
+          [addBtn, saveBtn, clearBtn].forEach(btn => {
+            if (!btn) return;
+            btn.disabled = Boolean(isBusy);
+            btn.classList.toggle('disabled', Boolean(isBusy));
+          });
+          if (isBusy){
+            setMessage('Working...', false);
+          } else {
+            setMessage('', false);
+          }
         }
-        google.script.run.withSuccessHandler(function(msg){
-          alert(msg); google.script.host.close();
-        }).saveNotionConfig(payload);
-      }
-      function clearToken(){
-        if (!confirm('Remove the stored Notion token?')) return;
-        const payload = { dbMap: gatherMap(), clearToken: true };
-        google.script.run.withSuccessHandler(function(msg){
-          alert(msg);
-          document.getElementById('token').value='';
-          setTokenStatus(false);
-        }).saveNotionConfig(payload);
-      }
-      google.script.run.withSuccessHandler(hydrate).readNotionConfig();
+
+        function setTokenStatus(hasToken){
+          const el = document.getElementById('tokenStatus');
+          if (!el) return;
+          el.textContent = hasToken ? 'Token stored securely (not shown).' : 'No token stored.';
+        }
+
+        function createRow(name, id){
+          const tr = document.createElement('tr');
+
+          const nameCell = document.createElement('td');
+          const nameInput = document.createElement('input');
+          nameInput.className = 'name';
+          nameInput.value = name || '';
+          nameInput.placeholder = 'BIO 1130';
+          nameCell.appendChild(nameInput);
+
+          const idCell = document.createElement('td');
+          const idInput = document.createElement('input');
+          idInput.className = 'dbid';
+          idInput.value = id || '';
+          idInput.placeholder = 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx';
+          idCell.appendChild(idInput);
+
+          const actionsCell = document.createElement('td');
+          const delBtn = document.createElement('button');
+          delBtn.type = 'button';
+          delBtn.className = 'mini';
+          delBtn.textContent = 'Delete';
+          delBtn.addEventListener('click', function(){
+            tr.remove();
+          });
+          actionsCell.appendChild(delBtn);
+
+          tr.appendChild(nameCell);
+          tr.appendChild(idCell);
+          tr.appendChild(actionsCell);
+          return tr;
+        }
+
+        function ensureStarterRows(){
+          if (!tbody) return;
+          tbody.innerHTML='';
+          ['BIO 1130', 'ANP 1111', 'PSY 1101'].forEach(course => {
+            tbody.appendChild(createRow(course, ''));
+          });
+        }
+
+        function hydrate(cfg){
+          if (!tbody) return;
+          tbody.innerHTML = '';
+          const map = cfg && cfg.dbMap ? cfg.dbMap : {};
+          const names = Object.keys(map);
+          if (names.length){
+            names.forEach(name => {
+              tbody.appendChild(createRow(name, map[name]));
+            });
+          } else {
+            ensureStarterRows();
+          }
+          setTokenStatus(Boolean(cfg && cfg.hasToken));
+        }
+
+        function gatherMap(){
+          const rows = Array.from(tbody ? tbody.querySelectorAll('tr') : []);
+          const map = {};
+          rows.forEach(row => {
+            const nameInput = row.querySelector('.name');
+            const idInput = row.querySelector('.dbid');
+            const name = nameInput ? nameInput.value.trim() : '';
+            const dbid = idInput ? idInput.value.trim() : '';
+            if (name && dbid){
+              map[name] = dbid;
+            }
+          });
+          return map;
+        }
+
+        function handleFailure(err){
+          console.error(err);
+          setBusy(false);
+          const msg = (err && err.message) ? err.message : 'An unexpected error occurred.';
+          setMessage(msg, true);
+        }
+
+        function save(){
+          setBusy(true);
+          const tokenValue = (document.getElementById('token').value || '').trim();
+          const payload = { dbMap: gatherMap() };
+          if (tokenValue){
+            payload.token = tokenValue;
+          }
+          google.script.run
+            .withSuccessHandler(function(msg){
+              setBusy(false);
+              alert(msg);
+              google.script.host.close();
+            })
+            .withFailureHandler(handleFailure)
+            .saveNotionConfig(payload);
+        }
+
+        function clearToken(){
+          if (!confirm('Remove the stored Notion token?')) return;
+          setBusy(true);
+          const payload = { dbMap: gatherMap(), clearToken: true };
+          google.script.run
+            .withSuccessHandler(function(msg){
+              setBusy(false);
+              alert(msg);
+              const tokenInput = document.getElementById('token');
+              if (tokenInput){ tokenInput.value=''; }
+              setTokenStatus(false);
+            })
+            .withFailureHandler(handleFailure)
+            .saveNotionConfig(payload);
+        }
+
+        function init(){
+          if (addBtn){
+            addBtn.addEventListener('click', function(){
+              if (!tbody) return;
+              tbody.appendChild(createRow('', ''));
+            });
+          }
+          if (saveBtn){ saveBtn.addEventListener('click', save); }
+          if (closeBtn){ closeBtn.addEventListener('click', function(){ google.script.host.close(); }); }
+          if (clearBtn){ clearBtn.addEventListener('click', clearToken); }
+
+          setBusy(true);
+          google.script.run
+            .withSuccessHandler(function(cfg){
+              setBusy(false);
+              hydrate(cfg || {});
+            })
+            .withFailureHandler(handleFailure)
+            .readNotionConfig();
+        }
+
+        init();
+      })();
     </script>
   </body>
 </html>
