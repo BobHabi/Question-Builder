@@ -891,13 +891,19 @@ function getDbMap(){
   try {
     const parsed = JSON.parse(raw);
     if (parsed && typeof parsed === 'object') {
-      return sanitizeCourseMap(parsed);
+      const sanitized = sanitizeCourseMap(parsed, { strict: false });
+      const parsedString = JSON.stringify(parsed || {});
+      const sanitizedString = JSON.stringify(sanitized);
+      if (parsedString !== sanitizedString) {
+        PROP.setProperty(DBMAP_KEY, sanitizedString);
+      }
+      return sanitized;
     }
   } catch(e){}
   return {};
 }
 function setDbMap(obj){
-  const sanitized = sanitizeCourseMap(obj);
+  const sanitized = sanitizeCourseMap(obj, { strict: true });
   PROP.setProperty(DBMAP_KEY, JSON.stringify(sanitized));
   const validDbIds = new Set(Object.values(sanitized));
   Object.keys(notionDbMetadataCache).forEach(dbId => {
@@ -1301,20 +1307,73 @@ function formatDateFromNotion(iso){
   }catch(e){ return ''; }
 }
 
-function sanitizeCourseMap(input){
+function sanitizeCourseMap(input, options){
+  const opts = options || {};
+  const strict = Boolean(opts.strict);
   const out = {};
   const seen = new Set();
+  const invalidCourses = [];
+  const duplicateCourses = [];
   const source = input && typeof input === 'object' ? input : {};
+
   Object.keys(source).forEach(key => {
     const name = clean(key);
-    const dbId = clean(source[key]);
-    if (!name || !dbId) return;
+    const dbIdRaw = source[key];
+    if (!name) {
+      if (strict) invalidCourses.push('(missing course name)');
+      return;
+    }
+
     const norm = name.toLowerCase();
-    if (seen.has(norm)) return;
+    if (seen.has(norm)) {
+      if (strict) duplicateCourses.push(name);
+      return;
+    }
+
+    const normalizedId = normalizeNotionDatabaseId(dbIdRaw);
+    if (!normalizedId) {
+      if (strict) invalidCourses.push(name);
+      return;
+    }
+
     seen.add(norm);
-    out[name] = dbId;
+    out[name] = normalizedId;
   });
+
+  if (strict && (invalidCourses.length || duplicateCourses.length)) {
+    const messages = [];
+    if (invalidCourses.length) {
+      messages.push('Invalid Notion database ID for: ' + invalidCourses.join(', '));
+    }
+    if (duplicateCourses.length) {
+      messages.push('Duplicate course names: ' + duplicateCourses.join(', '));
+    }
+    throw new Error(messages.join('; '));
+  }
+
   return out;
+}
+
+function normalizeNotionDatabaseId(value){
+  const raw = clean(value);
+  if (!raw) return '';
+
+  const withoutQuery = raw.split('?')[0].trim();
+  const hyphenatedMatch = withoutQuery.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+  if (hyphenatedMatch) {
+    return hyphenatedMatch[0].replace(/-/g, '').toLowerCase();
+  }
+
+  const allHexMatches = withoutQuery.match(/[0-9a-f]{32}/ig);
+  if (allHexMatches && allHexMatches.length) {
+    return allHexMatches[allHexMatches.length - 1].toLowerCase();
+  }
+
+  if (/^[0-9a-f]{32}$/i.test(raw)) {
+    return raw.toLowerCase();
+  }
+
+  return '';
 }
 
 function courseToDbId(course, mapOverride){
