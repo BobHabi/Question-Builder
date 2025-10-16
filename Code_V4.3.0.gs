@@ -7,9 +7,9 @@
  *    order-agnostic 18-column schema incl. Tags, robust Topic/Chapter import from various Notion property types.
  *
  * Menus:
- *  Exam Builder V4 → Open Exam Builder
- *  Notion Sync → Configure… / Preview Changes / Sync Down… / Sync Up (All rows in Import)
- *  Bank Tools → Merge / Upsert / Validate / Clear Highlights / Setup Last Practiced
+ *  Exam Builder V4 -> Open Exam Builder
+ *  Notion Sync -> Configure... / Preview Changes / Sync Down... / Sync Up (All rows in Import)
+ *  Bank Tools -> Merge / Upsert / Validate / Clear Highlights / Setup Last Practiced
  */
 
 // =========================
@@ -39,22 +39,22 @@ function onOpen() {
     .addItem('Open Exam Builder', 'showSidebar')
     .addSeparator()
     .addSubMenu(ui.createMenu('Notion Sync')
-      .addItem('Configure…', 'openNotionConfig')
+      .addItem('Configure...', 'openNotionConfig')
       .addItem('Preview Changes', 'notionPreview')
       .addSeparator()
-      .addItem('Sync Down…', 'openSyncDownFilters') // NEW picker & partial filters
-      .addItem('Sync Up (Import → Notion)', 'notionSyncUp')
+      .addItem('Sync Down...', 'openSyncDownFilters') // NEW picker & partial filters
+      .addItem('Sync Up (Import -> Notion)', 'notionSyncUp')
     )
     .addToUi();
 
   ui.createMenu('Bank Tools')
-    .addItem('Merge Import → Bank (append new)','mergeImportToBank')
-    .addItem('Upsert Import → Bank (update by Ref ID)','upsertImportToBank')
+    .addItem('Merge Import -> Bank (append new)','mergeImportToBank')
+    .addItem('Upsert Import -> Bank (update by Ref ID)','upsertImportToBank')
     .addSeparator()
     .addItem('Validate Bank Data', 'validateBankData')
     .addItem('Clear Validation Highlighting', 'clearValidationHighlighting')
     .addSeparator()
-    .addItem('Setup “Last Practiced” Column', 'setupLastPracticedColumn')
+    .addItem('Setup "Last Practiced" Column', 'setupLastPracticedColumn')
     .addToUi();
 }
 
@@ -106,7 +106,7 @@ function buildExamFromUI(config) {
   if (selected.length === 0) return 'Quota settings resulted in 0 questions. Try adjusting quotas or filters.';
 
   const courseName = clean(course) || 'Course';
-  const finalTitle = rawTitle ? `${courseName} - ${rawTitle}` : `${courseName} – Practice Exam`;
+  const finalTitle = rawTitle ? `${courseName} - ${rawTitle}` : `${courseName} - Practice Exam`;
 
   const doc = DocumentApp.create(finalTitle);
   const body = doc.getBody();
@@ -541,7 +541,7 @@ function setupLastPracticedColumn(){
   const lastRow=Math.max(2,s.getLastRow()); const col=c+1; s.getRange(2,col,lastRow-1,1).setNumberFormat('MM/dd/yyyy');
   const rule=SpreadsheetApp.newDataValidation().requireDate().setAllowInvalid(true).build();
   s.getRange(2,col,s.getMaxRows()-1,1).setDataValidation(rule);
-  SpreadsheetApp.getUi().alert('“Last Practiced” column formatted as MM/DD/YYYY with a date picker.');
+  SpreadsheetApp.getUi().alert('"Last Practiced" column formatted as MM/DD/YYYY with a date picker.');
 }
 
 // =========================
@@ -549,7 +549,7 @@ function setupLastPracticedColumn(){
 // =========================
 function openNotionConfig(){
   const html = HtmlService.createHtmlOutputFromFile('NotionConfig').setWidth(520).setHeight(520);
-  SpreadsheetApp.getUi().showModalDialog(html, 'Notion Sync • Configuration');
+  SpreadsheetApp.getUi().showModalDialog(html, 'Notion Sync - Configuration');
 }
 
 function readNotionConfig(){
@@ -602,7 +602,7 @@ function openSyncDownFilters(){
       </style>
     </head>
     <body>
-      <h3>Sync Down • Filters</h3>
+      <h3>Sync Down - Filters</h3>
       <label>Course</label>
       <select id="course">
         <option value="__ALL__">All configured courses</option>
@@ -648,7 +648,7 @@ function openSyncDownFilters(){
     </body>
     </html>
   `).setWidth(520).setHeight(560);
-  SpreadsheetApp.getUi().showModalDialog(html, 'Sync Down • Filters');
+  SpreadsheetApp.getUi().showModalDialog(html, 'Sync Down - Filters');
 }
 
 function htmlEscape(s){ return String(s||'').replace(/[&<>"']/g, m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m])); }
@@ -658,7 +658,7 @@ function runSyncDownWithFilters(filters){
   const cfg = requireNotionConfig();
   const dbMap = getDbMap();
   const courseNames = Object.keys(dbMap);
-  if (!courseNames.length) throw new Error('No courses configured in Notion Sync → Configure…');
+  if (!courseNames.length) throw new Error('No courses configured in Notion Sync -> Configure...');
 
   const importSheet = getSheet(SHEET_IMPORT); if(!importSheet) throw new Error('Import sheet missing.');
   ensureCanonicalHeaders(importSheet);
@@ -726,7 +726,7 @@ function runSyncDownWithFilters(filters){
   return `Sync Down complete.\nFetched: ${fetched}\nUpdated in Import: ${updates}\nAdded to Import: ${adds}`;
 }
 
-// Back-compat Preview (counts by Ref IDs vs Import) – iterates all configured DBs
+// Back-compat Preview (counts by Ref IDs vs Import) - iterates all configured DBs
 function notionPreview(){
   const cfg = requireNotionConfig();
   const dbMap = getDbMap();
@@ -743,9 +743,9 @@ function notionPreview(){
     newForNotion[k] = diffSet(subset, notionIndex[k]);
   });
 
-  let lines = ['Preview (by Ref ID)', '', 'From Notion → Import (new in Notion):'];
+  let lines = ['Preview (by Ref ID)', '', 'From Notion -> Import (new in Notion):'];
   courses.forEach(k => lines.push(` ${k}: ${newInNotion[k].size}`));
-  lines.push('', 'From Import → Notion (new in Import):');
+  lines.push('', 'From Import -> Notion (new in Import):');
   courses.forEach(k => lines.push(` ${k}: ${newForNotion[k].size}`));
   SpreadsheetApp.getUi().alert(lines.join('\n'));
 }
@@ -778,7 +778,7 @@ function notionSyncUp(){
 // =========================
 function requireNotionConfig(){
   const token = PROP.getProperty('NOTION_TOKEN');
-  if(!token){ throw new Error('Notion token missing. Use Notion Sync → Configure…'); }
+  if(!token){ throw new Error('Notion token missing. Use Notion Sync -> Configure...'); }
   return { token };
 }
 
@@ -1037,7 +1037,7 @@ function courseToDbId(course){
   return null;
 }
 
-// Canonical headers (18) – order agnostic
+// Canonical headers (18) - order agnostic
 const CANON_HEADERS = [
   'Question','Question Type','Course','Topic/Chapter','Difficulty','Correct/Incorrect',
   'Choice A','Choice B','Choice C','Choice D','Choice E',
@@ -1289,7 +1289,7 @@ function randShuffle(arr){ for (let i=arr.length-1;i>0;i--){ const j=Math.floor(
 function parseList(s){ return clean(s).split(/[;,]/).map(x=>x.trim()).filter(Boolean); }
 function parseListSemicolon(s){ return clean(s).split(/[;]+/).map(x=>x.trim()).filter(Boolean); }
 function toIntOrZero(s){ s = clean(s); return (s && !isNaN(s)) ? Math.max(0, parseInt(s,10)) : 0; }
-function stripLeadingNum(s){ s = clean(s); return s.replace(/^\s*(?:Q\s*)?\d+\s*[\)\.\-:–—]\s*/i, ''); }
+function stripLeadingNum(s){ s = clean(s); return s.replace(/^\s*(?:Q\s*)?\d+\s*[\)\.\-:]\s*/i, ''); }
 function stripChoicePrefix(s){ s = clean(s); return s.replace(/^\s*[A-E]\s*[\.\)\-:]\s*/i, ''); }
 function cellContainsAny(cellValueLower, needlesLower){
   if(needlesLower.length === 0) return true;

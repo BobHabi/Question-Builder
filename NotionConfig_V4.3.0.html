@@ -21,7 +21,7 @@
     </style>
   </head>
   <body>
-    <h3>Notion Sync • Configuration</h3>
+    <h3>Notion Sync - Configuration</h3>
     <div class="row">
       <label for="token">Notion Internal Integration Token</label>
       <input id="token" type="password" placeholder="secret_...">
@@ -29,16 +29,16 @@
         <small id="tokenStatus">Token not yet loaded.</small>
         <button class="mini secondary" type="button" onclick="clearToken()">Clear Token</button>
       </div>
-      <small>Create in Notion: Settings → Connections → Develop or manage integrations → New integration.</small>
+      <small>Create in Notion: Settings -> Connections -> Develop or manage integrations -> New integration.</small>
     </div>
 
-    <h4 style="margin-top:16px;">Courses ↔ Database IDs</h4>
+    <h4 style="margin-top:16px;">Courses <-> Database IDs</h4>
     <button class="mini right" type="button" onclick="addRow()">+ Add Course</button>
     <table id="mapTable">
       <thead><tr><th style="width:45%">Course Name (e.g., BIO 1130)</th><th>Database ID</th><th style="width:70px">Actions</th></tr></thead>
       <tbody></tbody>
     </table>
-    <small class="hint">Course name is what appears in the “Course” column in Sheets. You can add as many as you like.</small>
+    <small class="hint">Course name is what appears in the "Course" column in Sheets. You can add as many as you like.</small>
 
     <div class="btns">
       <button type="button" onclick="save()">Save</button>
