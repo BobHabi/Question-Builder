@@ -619,56 +619,132 @@ function openSyncDownFilters(){
         .btns { margin-top: 16px; display:flex; gap:10px; }
         button { background:#1a73e8; color:#fff; border:none; padding:10px 14px; border-radius:8px; cursor:pointer; font-weight:700; }
         button.secondary { background:#5f6368; }
+        button.disabled { opacity:0.6; cursor:default; }
         small { color:#5f6368; display:block; margin-top:4px; }
+        #message { margin-top:12px; font-size:12px; display:none; }
       </style>
     </head>
     <body>
       <h3>Sync Down - Filters</h3>
-      <label>Course</label>
+      <label for="course">Course</label>
       <select id="course">
         <option value="__ALL__">All configured courses</option>
         ${courseOptions}
       </select>
-      <label>Ref ID prefix (optional)</label>
+      <label for="refPrefix">Ref ID prefix (optional)</label>
       <input id="refPrefix" placeholder="e.g., BIO-">
       <div class="row">
         <div>
-          <label>Ref ID range start (optional)</label>
+          <label for="refStart">Ref ID range start (optional)</label>
           <input id="refStart" placeholder="e.g., BIO-0001">
         </div>
         <div>
-          <label>Ref ID range end (optional)</label>
+          <label for="refEnd">Ref ID range end (optional)</label>
           <input id="refEnd" placeholder="e.g., BIO-0500">
         </div>
       </div>
-      <label>Topic/Chapter contains (semicolon list)</label>
+      <label for="topics">Topic/Chapter contains (semicolon list)</label>
       <input id="topics" placeholder="e.g., T/Ch 01; Topic 5">
-      <label>Tags include ANY (semicolon list)</label>
+      <label for="tags">Tags include ANY (semicolon list)</label>
       <input id="tags" placeholder="e.g., genetics; exam1; image-required">
-      <label>Last Edited Since (YYYY-MM-DD) (optional)</label>
+      <label for="lastEdited">Last Edited Since (YYYY-MM-DD) (optional)</label>
       <input id="lastEdited" placeholder="e.g., 2025-09-01">
+      <div id="message" role="alert"></div>
       <div class="btns">
-        <button onclick="run()">Sync Down</button>
-        <button class="secondary" onclick="google.script.host.close()">Cancel</button>
+        <button id="runBtn" type="button">Sync Down</button>
+        <button id="cancelBtn" type="button" class="secondary">Cancel</button>
       </div>
       <script>
-        function val(id){ return document.getElementById(id).value.trim(); }
-        function run(){
-          const payload = {
-            course: val('course'),
-            refPrefix: val('refPrefix'),
-            refStart: val('refStart'),
-            refEnd: val('refEnd'),
-            topics: val('topics'),
-            tags: val('tags'),
-            lastEdited: val('lastEdited')
-          };
-          google.script.run.withSuccessHandler(function(msg){ alert(msg); google.script.host.close(); }).runSyncDownWithFilters(payload);
-        }
+        (function(){
+          const runBtn = document.getElementById('runBtn');
+          const cancelBtn = document.getElementById('cancelBtn');
+          const message = document.getElementById('message');
+          const inputs = Array.from(document.querySelectorAll('input, select'));
+
+          function setMessage(text, isError){
+            if (!message) return;
+            if (!text){
+              message.style.display = 'none';
+              message.textContent = '';
+              return;
+            }
+            message.style.display = 'block';
+            message.style.color = isError ? '#d93025' : '#188038';
+            message.textContent = text;
+          }
+
+          function setBusy(isBusy){
+            inputs.forEach(el => { el.disabled = Boolean(isBusy); });
+            [runBtn, cancelBtn].forEach(btn => {
+              if (!btn) return;
+              btn.disabled = Boolean(isBusy && btn === runBtn);
+              btn.classList.toggle('disabled', Boolean(isBusy && btn === runBtn));
+            });
+            if (isBusy){
+              setMessage('Sync in progress...', false);
+            } else {
+              setMessage('', false);
+            }
+          }
+
+          function valueOf(id){
+            const el = document.getElementById(id);
+            return el ? el.value.trim() : '';
+          }
+
+          function gather(){
+            return {
+              course: valueOf('course'),
+              refPrefix: valueOf('refPrefix'),
+              refStart: valueOf('refStart'),
+              refEnd: valueOf('refEnd'),
+              topics: valueOf('topics'),
+              tags: valueOf('tags'),
+              lastEdited: valueOf('lastEdited')
+            };
+          }
+
+          function handleSuccess(msg){
+            setBusy(false);
+            alert(msg);
+            google.script.host.close();
+          }
+
+          function handleFailure(err){
+            setBusy(false);
+            var text = 'An unexpected error occurred.';
+            if (err){
+              if (typeof err === 'string') {
+                text = err;
+              } else if (err.message) {
+                text = err.message;
+              } else {
+                text = String(err);
+              }
+            }
+            setMessage(text, true);
+          }
+
+          if (cancelBtn){
+            cancelBtn.addEventListener('click', function(){
+              google.script.host.close();
+            });
+          }
+
+          if (runBtn){
+            runBtn.addEventListener('click', function(){
+              setBusy(true);
+              google.script.run
+                .withSuccessHandler(handleSuccess)
+                .withFailureHandler(handleFailure)
+                .runSyncDownWithFilters(gather());
+            });
+          }
+        })();
       </script>
     </body>
     </html>
-  `).setWidth(520).setHeight(560);
+  `).setWidth(520).setHeight(580);
   SpreadsheetApp.getUi().showModalDialog(html, 'Sync Down - Filters');
 }
 
@@ -752,6 +828,10 @@ function notionPreview(){
   const cfg = requireNotionConfig();
   const dbMap = getDbMap();
   const courses = Object.keys(dbMap);
+  if (!courses.length) {
+    SpreadsheetApp.getUi().alert('No courses configured. Use Notion Sync -> Configure... to add database IDs.');
+    return;
+  }
   const notionIndex = {};
   courses.forEach(c => { notionIndex[c] = indexNotionRefs(dbMap[c], cfg); });
   const importIndex = indexSheet(getSheet(SHEET_IMPORT));
@@ -764,10 +844,13 @@ function notionPreview(){
     newForNotion[k] = diffSet(subset, notionIndex[k]);
   });
 
-  let lines = ['Preview (by Ref ID)', '', 'From Notion -> Import (new in Notion):'];
-  courses.forEach(k => lines.push(` ${k}: ${newInNotion[k].size}`));
-  lines.push('', 'From Import -> Notion (new in Import):');
-  courses.forEach(k => lines.push(` ${k}: ${newForNotion[k].size}`));
+  const totalNewInNotion = courses.reduce((sum, k) => sum + (newInNotion[k] ? newInNotion[k].size : 0), 0);
+  const totalNewForNotion = courses.reduce((sum, k) => sum + (newForNotion[k] ? newForNotion[k].size : 0), 0);
+
+  let lines = ['Preview (by Ref ID)', '', `From Notion -> Import (new in Notion): ${totalNewInNotion}`];
+  courses.forEach(k => lines.push(`  ${k}: ${newInNotion[k].size}`));
+  lines.push('', `From Import -> Notion (new in Import): ${totalNewForNotion}`);
+  courses.forEach(k => lines.push(`  ${k}: ${newForNotion[k].size}`));
   SpreadsheetApp.getUi().alert(lines.join('\n'));
 }
 
