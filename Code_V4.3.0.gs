@@ -1224,7 +1224,7 @@ function recordToNotionProps(rec){
 }
 
 // ---- Robust Notion reading helpers ----
-function normalizeName(s){ return toLower(String(s||'').replace(/[^a-z0-9]+/g,'')); }
+function normalizeName(s){ return toLower(String(s||'')).replace(/[^a-z0-9]+/g,''); }
 
 function pickProp(props, candidates){
   const keys = Object.keys(props||{});
