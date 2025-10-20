@@ -1448,7 +1448,7 @@ function diffSet(aSet, bSet){
 function getSheet(name){ return SpreadsheetApp.getActive().getSheetByName(name); }
 function clean(s){ return (s == null ? '' : String(s)).trim(); }
 function toLower(s){ return clean(s).toLowerCase(); }
-function randShuffle(arr){ for (let i=arr.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [arr[i],arr[j]]=[arr[j]]; } return arr; }
+function randShuffle(arr){ for (let i=arr.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [arr[i],arr[j]]=[arr[j],arr[i]]; } return arr; }
 function parseList(s){ return clean(s).split(/[;,]/).map(x=>x.trim()).filter(Boolean); }
 function parseListSemicolon(s){ return clean(s).split(/[;]+/).map(x=>x.trim()).filter(Boolean); }
 function toIntOrZero(s){ s = clean(s); return (s && !isNaN(s)) ? Math.max(0, parseInt(s,10)) : 0; }
