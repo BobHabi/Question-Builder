@@ -37,6 +37,7 @@ function onOpen() {
   const ui = SpreadsheetApp.getUi();
   ui.createMenu('Exam Builder V4')
     .addItem('Open Exam Builder', 'showSidebar')
+    .addItem('Print Question by Ref ID', 'printQuestionByRefId')
     .addSeparator()
     .addSubMenu(ui.createMenu('Notion Sync')
       .addItem('Configure...', 'openNotionConfig')
@@ -63,6 +64,103 @@ function showSidebar() {
       .setTitle('Exam Builder V4.3.0')
       .setWidth(320);
   SpreadsheetApp.getUi().showSidebar(html);
+}
+
+function printQuestionByRefId(){
+  const ui = SpreadsheetApp.getUi();
+  const response = ui.prompt(
+    'Print Question by Ref ID',
+    'Enter the Ref ID to generate a single-question document with its answer:',
+    ui.ButtonSet.OK_CANCEL
+  );
+
+  if (response.getSelectedButton() !== ui.Button.OK) return;
+
+  const refInput = clean(response.getResponseText());
+  if (!refInput) {
+    ui.alert('Please enter a Ref ID.');
+    return;
+  }
+
+  const bankSheet = getSheet(SHEET_BANK);
+  if (!bankSheet) {
+    ui.alert('Error: "Bank" sheet not found.');
+    return;
+  }
+
+  const data = bankSheet.getDataRange().getValues();
+  if (data.length < 2) {
+    ui.alert('The "Bank" sheet does not contain any questions.');
+    return;
+  }
+
+  const headers = data[0].map(h => toLower(clean(h)));
+  const idxRef = headers.indexOf(toLower(REF_HEADER));
+  if (idxRef === -1) {
+    ui.alert(`Unable to find a "${REF_HEADER}" column in the "Bank" sheet.`);
+    return;
+  }
+
+  const columnIndexes = {
+    question: headers.indexOf('question'),
+    type: headers.indexOf('question type'),
+    course: headers.indexOf('course'),
+    topic: headers.indexOf('topic/chapter'),
+    difficulty: headers.indexOf('difficulty'),
+    correctStatus: headers.indexOf('correct/incorrect'),
+    myAnswer: headers.indexOf('my answer'),
+    source: headers.indexOf('source'),
+    choices: {
+      A: headers.indexOf('choice a'),
+      B: headers.indexOf('choice b'),
+      C: headers.indexOf('choice c'),
+      D: headers.indexOf('choice d'),
+      E: headers.indexOf('choice e')
+    },
+    answer: headers.indexOf('correct answer(s)'),
+    explanation: headers.indexOf('explanation'),
+    ref: idxRef
+  };
+
+  const targetRefLower = toLower(refInput);
+  const matches = [];
+  for (let r = 1; r < data.length; r++) {
+    const refValue = clean(data[r][idxRef]);
+    if (toLower(refValue) === targetRefLower) {
+      matches.push({ row: data[r], rowNumber: r + 1 });
+    }
+  }
+
+  if (matches.length === 0) {
+    ui.alert(`No question found with Ref ID "${refInput}".`);
+    return;
+  }
+
+  if (matches.length > 1) {
+    ui.alert(`Warning: Multiple questions share Ref ID "${refInput}". Using the first match on row ${matches[0].rowNumber}.`);
+  }
+
+  const questionRecord = buildQuestionRecordFromRow(matches[0].row, columnIndexes, refInput);
+  const renderItem = questionToRenderEntry(questionRecord, false);
+
+  const titleParts = [];
+  if (questionRecord.course) titleParts.push(questionRecord.course);
+  titleParts.push(`Ref ${questionRecord.refId}`);
+  const docTitle = titleParts.join(' - ') || `Ref ${questionRecord.refId}`;
+
+  const doc = DocumentApp.create(docTitle);
+  const body = doc.getBody();
+  body.clear();
+
+  styleParagraph(body.appendParagraph(docTitle), { size: 14, bold: true, family: 'Arial', center: true });
+  body.appendParagraph('');
+  renderStudent(body, [renderItem], '', true);
+  styleParagraph(body.appendParagraph('Answer Key'), { fontFamily: 'Georgia', size: 14, bold: true });
+  body.appendParagraph('');
+  renderAnswers(body, [renderItem], '', true);
+
+  doc.saveAndClose();
+  showDocLink(doc.getUrl(), 'Single-question document generated successfully.');
 }
 
 // =========================
@@ -134,36 +232,19 @@ function buildExamFromUI(config) {
     renderAnswers(body, renderData, clean(config.searchText), showTopicAtEnd);
   }
 
-  // Optional Difficulty Summary Page
+  // Optional Summary Page
   const includeSummary = String(config.includeSummary) === 'true';
   if (includeSummary) {
     body.appendPageBreak();
-    styleParagraph(body.appendParagraph('Difficulty Summary'), { size: 14, bold: true, family: 'Arial' });
+    styleParagraph(body.appendParagraph('Summary Page'), { size: 14, bold: true, family: 'Arial' });
     body.appendParagraph('');
-
-    const counts = { 'Very Easy':0, 'Easy':0, 'Medium':0, 'Hard':0, 'Very Hard':0, '':0 };
-    renderData.forEach(q => {
-      const d = clean(q.difficulty);
-      if (counts.hasOwnProperty(d)) counts[d]++; else counts['']++;
-    });
-    const total = renderData.length || 1;
-    const rows = [['Difficulty','Count','Percent']];
-    ['Very Easy','Easy','Medium','Hard','Very Hard'].forEach(d=>{
-      const c = counts[d]||0;
-      const pct = Math.round((c*10000)/total)/100;
-      rows.push([d, String(c), pct+'%']);
-    });
-
-    const table = body.appendTable(rows);
-    table.setBorderWidth(0);
-    for (let i=0; i<table.getNumRows(); i++) {
-      const r = table.getRow(i);
-      for (let j=0; j<r.getNumCells(); j++) {
-        const cell = r.getCell(j);
-        const p = cell.getChild(0).asParagraph();
-        styleParagraph(p, { family:'Arial', size: 11, bold: i===0 });
-      }
-    }
+    appendDifficultySummarySection(body, renderData);
+    appendSummarySectionSpacer(body);
+    appendTopicsSummarySection(body, renderData);
+    appendSummarySectionSpacer(body);
+    appendIncorrectDifficultySummarySection(body, renderData);
+    appendSummarySectionSpacer(body);
+    appendIncorrectMyAnswerSummarySection(body, renderData);
   }
 
   doc.saveAndClose();
@@ -188,46 +269,63 @@ function prepareSelectionForBuild(config) {
     shuffleChoices, showTopicAtEnd
   } = filterAndSelect(config);
 
-  const renderData = orderedQuestions.map(q => ({
-    QT: q.QT_raw,
-    stem: stripLeadingNum(q.Q),
-    choices: [],
-    ansRaw: q.ANS,
-    ansMapped: null,
-    expl: q.EXPL || '',
-    refId: q.refId,
-    topics: q.topics,
-    difficulty: q.Difficulty || ''
-  }));
-
-  for (let i = 0; i < renderData.length; i++) {
-    const item = renderData[i];
-    const isMCQ = (item.QT || '').toLowerCase() === 'mcq';
-    if (!isMCQ) continue;
-    const source = orderedQuestions.find(x => x.refId === item.refId);
-    let choices = [
-      {label:'A', text: stripChoicePrefix(source.A)},
-      {label:'B', text: stripChoicePrefix(source.B)},
-      {label:'C', text: stripChoicePrefix(source.C)},
-      {label:'D', text: stripChoicePrefix(source.D)},
-      {label:'E', text: stripChoicePrefix(source.E)}
-    ].filter(ch => clean(ch.text) !== '');
-    if (String(shuffleChoices) === 'true' && choices.length > 1) {
-      randShuffle(choices);
-    }
-
-    const ansTokens = (source.ANS || '').split(/[,;]\s*/).map(x => x.trim().toUpperCase()).filter(Boolean);
-    let mapped = [];
-    ansTokens.forEach(tok => {
-      const idx = choices.findIndex(ch => ch.label === tok);
-      if (idx >= 0) mapped.push(['A','B','C','D','E'][idx]);
-    });
-
-    item.choices = choices.map((ch, idx) => ({ shown: ['a','b','c','d','e'][idx], text: ch.text }));
-    item.ansMapped = mapped.length ? mapped.join('; ') : source.ANS;
-  }
+  const renderData = orderedQuestions.map(q => questionToRenderEntry(q, shuffleChoices));
 
   return { selected: selectedQuestions, ordered: orderedQuestions, renderData, showTopicAtEnd, course, examTitle, examSubtitle };
+}
+
+function questionToRenderEntry(question, shuffleChoices){
+  const item = {
+    QT: question.QT_raw,
+    stem: stripLeadingNum(question.Q),
+    choices: [],
+    ansRaw: question.ANS,
+    ansMapped: question.ANS,
+    expl: question.EXPL || '',
+    refId: question.refId,
+    topics: question.topics,
+    difficulty: question.Difficulty || '',
+    correctStatus: question.correctStatus || '',
+    myAnswer: question.myAnswer || ''
+  };
+
+  const isMCQ = (item.QT || '').toLowerCase() === 'mcq';
+  if (!isMCQ) {
+    return item;
+  }
+
+  let choices = [
+    { label: 'A', text: stripChoicePrefix(question.A) },
+    { label: 'B', text: stripChoicePrefix(question.B) },
+    { label: 'C', text: stripChoicePrefix(question.C) },
+    { label: 'D', text: stripChoicePrefix(question.D) },
+    { label: 'E', text: stripChoicePrefix(question.E) }
+  ].filter(ch => clean(ch.text) !== '');
+
+  if (String(shuffleChoices) === 'true' && choices.length > 1) {
+    randShuffle(choices);
+  }
+
+  const ansTokens = (question.ANS || '').split(/[,;]\s*/).map(x => x.trim().toUpperCase()).filter(Boolean);
+  const mapped = [];
+  ansTokens.forEach(tok => {
+    const idx = choices.findIndex(ch => ch.label === tok);
+    if (idx >= 0) {
+      mapped.push(['A','B','C','D','E'][idx]);
+    }
+  });
+
+  if (mapped.length > 0) {
+    item.ansMapped = mapped.join('; ');
+  }
+
+  item.choices = choices.map((ch, idx) => ({
+    shown: ['a','b','c','d','e'][idx],
+    label: ch.label,
+    text: ch.text
+  }));
+
+  return item;
 }
 
 function computeCountsOnly(config) {
@@ -283,41 +381,56 @@ function filterAndSelect(config, countsOnly) {
   const cAns=col('correct answer(s)'), cExpl=col('explanation'), cRef=col('ref id');
   const cLastPracticed = colByAny(['Last Practiced', 'Last Practiced Date'], headers);
 
+  const columnIndexes = {
+    question: cQ,
+    type: cT,
+    course: cCourse,
+    topic: cTopic,
+    difficulty: cDiff,
+    correctStatus: cCI,
+    myAnswer: cMyAns,
+    source: cSource,
+    choices: { A: cA, B: cB, C: cC, D: cD, E: cE },
+    answer: cAns,
+    explanation: cExpl,
+    ref: cRef
+  };
+
   let rows = [];
   for (let r = 1; r < bankData.length; r++) {
     const row = bankData[r];
 
-    if (toLower(row[cCourse]) !== toLower(course)) continue;
+    const rowRecord = buildQuestionRecordFromRow(row, columnIndexes, 'R' + (r + 1));
 
-    const rowTopicLower = toLower(row[cTopic]);
+    if (toLower(rowRecord.course) !== toLower(course)) continue;
+
+    const rowTopicLower = toLower(rowRecord.topics);
     if (topicsList.length > 0 && !cellContainsAny(rowTopicLower, topicsList)) continue;
     if (excludeTopicsList.length > 0 && cellContainsAny(rowTopicLower, excludeTopicsList)) continue;
 
-    const rowDiffLower = toLower(row[cDiff]);
+    const rowDiffLower = toLower(rowRecord.Difficulty);
     if (diffSet.size > 0 && !diffSet.has(rowDiffLower)) continue;
 
-    const rowTypeLower = toLower(row[cT]);
+    const rowTypeLower = rowRecord.QT_clean;
     if (typeSet.size > 0 && !typeSet.has(rowTypeLower)) continue;
 
-    const rowCorrectStatusLower = (cCI > -1) ? toLower(row[cCI]) : '';
+    const rowCorrectStatusLower = toLower(rowRecord.correctStatus);
     if (corrSet.size > 0 && !corrSet.has(rowCorrectStatusLower)) continue;
 
-    const rowMyAns = (cMyAns > -1) ? clean(row[cMyAns]) : '';
+    const rowMyAns = rowRecord.myAnswer;
     if (myAnsSet.size > 0 && !myAnsSet.has(rowMyAns)) continue;
 
-    const rowSourceLower = (cSource > -1) ? toLower(row[cSource]) : '';
+    const rowSourceLower = toLower(rowRecord.source);
     if (sourceList.length > 0 && !sourceList.some(s => rowSourceLower.includes(s))) continue;
     if (excludeSourceList.length > 0 && excludeSourceList.some(s => rowSourceLower.includes(s))) continue;
 
-    const rowQuestionText = clean(row[cQ]);
-    const chA = clean(row[cA]), chB = clean(row[cB]), chC = clean(row[cC]), chD = clean(row[cD]), chE = clean(row[cE]);
+    const rowQuestionText = rowRecord.Q;
+    const chA = rowRecord.A, chB = rowRecord.B, chC = rowRecord.C, chD = rowRecord.D, chE = rowRecord.E;
     if (cleanSearchText) {
       const needle = toLower(cleanSearchText);
       const hay = toLower([rowQuestionText, chA, chB, chC, chD, chE].filter(Boolean).join(' || '));
       if (!hay.includes(needle)) continue;
     }
-    const rowExplanationText = (cExpl > -1) ? clean(row[cExpl]) : '';
-
     const lastPracticedRaw  = (cLastPracticed > -1) ? row[cLastPracticed] : null;
     const lastPracticedDate = parseDateValue(lastPracticedRaw);
 
@@ -335,17 +448,7 @@ function filterAndSelect(config, countsOnly) {
       if (startOfDay(lastPracticedDate) > cutoffNP) continue;
     }
 
-    rows.push({
-      Q: rowQuestionText,
-      QT_raw: clean(row[cT]),
-      QT_clean: rowTypeLower,
-      Difficulty: clean(row[cDiff]),
-      topics: clean(row[cTopic]),
-      refId: clean(row[cRef]) || ('R' + (r + 1)),
-      A: chA, B: chB, C: chC, D: chD, E: chE,
-      ANS: clean(row[cAns]),
-      EXPL: rowExplanationText
-    });
+    rows.push(rowRecord);
   }
 
   const matchedCount = rows.length;
@@ -397,6 +500,30 @@ function filterAndSelect(config, countsOnly) {
   return { selectedQuestions, orderedQuestions, matchedCount, course, examTitle, examSubtitle, shuffleChoices, showTopicAtEnd };
 }
 
+function buildQuestionRecordFromRow(row, columnIndexes, fallbackRefId){
+  const question = {
+    Q: clean(valueAt(row, columnIndexes.question)),
+    QT_raw: clean(valueAt(row, columnIndexes.type)),
+    Difficulty: clean(valueAt(row, columnIndexes.difficulty)),
+    topics: clean(valueAt(row, columnIndexes.topic)),
+    refId: clean(valueAt(row, columnIndexes.ref)) || fallbackRefId,
+    A: clean(valueAt(row, columnIndexes.choices.A)),
+    B: clean(valueAt(row, columnIndexes.choices.B)),
+    C: clean(valueAt(row, columnIndexes.choices.C)),
+    D: clean(valueAt(row, columnIndexes.choices.D)),
+    E: clean(valueAt(row, columnIndexes.choices.E)),
+    ANS: clean(valueAt(row, columnIndexes.answer)),
+    EXPL: clean(valueAt(row, columnIndexes.explanation)),
+    correctStatus: clean(valueAt(row, columnIndexes.correctStatus)),
+    myAnswer: clean(valueAt(row, columnIndexes.myAnswer)),
+    course: clean(valueAt(row, columnIndexes.course)),
+    source: clean(valueAt(row, columnIndexes.source))
+  };
+
+  question.QT_clean = toLower(question.QT_raw);
+  return question;
+}
+
 // =========================
 // Rendering
 // =========================
@@ -438,6 +565,163 @@ function renderAnswers(body, render, searchText, showTopicAtEnd){
     if(q.expl){ const p=body.appendParagraph('Explanation: '+q.expl); styleParagraph(p,{fontFamily:'Georgia',size:12}); highlightText(p, searchText); }
     body.appendParagraph('');
   }
+}
+
+function appendSummarySectionSpacer(body){ if(body) body.appendParagraph(''); }
+
+function appendDifficultySummarySection(body, renderData){
+  styleParagraph(body.appendParagraph('Difficulty Summary'), { size: 12, bold: true, family: 'Arial' });
+  const counts = { other: 0 };
+  DIFF_ORDER.forEach(d => { counts[d] = 0; });
+
+  renderData.forEach(q => {
+    const difficulty = clean(q.difficulty);
+    if (counts.hasOwnProperty(difficulty)) {
+      counts[difficulty]++;
+    } else {
+      counts.other++;
+    }
+  });
+
+  const total = renderData.length;
+  const rows = [['Difficulty','Count','Percent']];
+  DIFF_ORDER.forEach(diff => {
+    const count = counts[diff] || 0;
+    rows.push([diff, String(count), formatPercent(count, total)]);
+  });
+  if (counts.other) {
+    rows.push(['Other/Unspecified', String(counts.other), formatPercent(counts.other, total)]);
+  }
+
+  appendSummaryTable(body, rows);
+}
+
+function appendTopicsSummarySection(body, renderData){
+  styleParagraph(body.appendParagraph('Topics Summary'), { size: 12, bold: true, family: 'Arial' });
+  const total = renderData.length;
+  const counts = new Map();
+
+  renderData.forEach(q => {
+    const topicTokens = extractTopicTokens(q.topics);
+    if (topicTokens.length === 0) {
+      topicTokens.push('Unspecified');
+    }
+    const uniqueTokens = Array.from(new Set(topicTokens.map(normalizeTopicLabel)));
+    uniqueTokens.forEach(tok => counts.set(tok, (counts.get(tok) || 0) + 1));
+  });
+
+  if (counts.size === 0) {
+    appendNoDataParagraph(body, 'No topic data available.');
+    return;
+  }
+
+  const rows = [['Topic','Count','Percent']];
+  Array.from(counts.entries())
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .forEach(([topic, count]) => {
+      rows.push([topic, String(count), formatPercent(count, total)]);
+    });
+
+  appendSummaryTable(body, rows);
+}
+
+function appendIncorrectDifficultySummarySection(body, renderData){
+  styleParagraph(body.appendParagraph('Incorrect Difficulty Summary'), { size: 12, bold: true, family: 'Arial' });
+  const incorrect = renderData.filter(q => isMarkedIncorrect(q.correctStatus));
+  const totalIncorrect = incorrect.length;
+  if (totalIncorrect === 0) {
+    appendNoDataParagraph(body, 'No incorrect answers recorded.');
+    return;
+  }
+
+  styleParagraph(body.appendParagraph('Total incorrect answers: ' + totalIncorrect), { family: 'Arial', size: 11 });
+
+  const counts = { other: 0 };
+  DIFF_ORDER.forEach(d => { counts[d] = 0; });
+  incorrect.forEach(q => {
+    const difficulty = clean(q.difficulty);
+    if (counts.hasOwnProperty(difficulty)) {
+      counts[difficulty]++;
+    } else {
+      counts.other++;
+    }
+  });
+
+  const rows = [['Difficulty','Count','Percent']];
+  DIFF_ORDER.forEach(diff => {
+    const count = counts[diff] || 0;
+    rows.push([diff, String(count), formatPercent(count, totalIncorrect)]);
+  });
+  if (counts.other) {
+    rows.push(['Other/Unspecified', String(counts.other), formatPercent(counts.other, totalIncorrect)]);
+  }
+
+  appendSummaryTable(body, rows);
+}
+
+function appendIncorrectMyAnswerSummarySection(body, renderData){
+  styleParagraph(body.appendParagraph('Incorrect My Answer Summary'), { size: 12, bold: true, family: 'Arial' });
+  const incorrect = renderData.filter(q => isMarkedIncorrect(q.correctStatus));
+  const totalIncorrect = incorrect.length;
+  if (totalIncorrect === 0) {
+    appendNoDataParagraph(body, 'No incorrect answers recorded.');
+    return;
+  }
+
+  const answerBuckets = { '0': 0, '50': 0, '75': 0, '100': 0, other: 0 };
+  incorrect.forEach(q => {
+    const answer = clean(q.myAnswer);
+    const bucketKey = answerBuckets.hasOwnProperty(answer) ? answer : 'other';
+    answerBuckets[bucketKey]++;
+  });
+
+  styleParagraph(body.appendParagraph('Total incorrect answers: ' + totalIncorrect), { family: 'Arial', size: 11 });
+
+  const rows = [['My Answer','Count','Percent']];
+  ['0','50','75','100'].forEach(val => {
+    const count = answerBuckets[val] || 0;
+    rows.push([val, String(count), formatPercent(count, totalIncorrect)]);
+  });
+  if (answerBuckets.other) {
+    rows.push(['Other/Unspecified', String(answerBuckets.other), formatPercent(answerBuckets.other, totalIncorrect)]);
+  }
+
+  appendSummaryTable(body, rows);
+}
+
+function appendSummaryTable(body, rows){
+  const table = body.appendTable(rows);
+  table.setBorderWidth(0);
+  for (let i = 0; i < table.getNumRows(); i++) {
+    const row = table.getRow(i);
+    for (let j = 0; j < row.getNumCells(); j++) {
+      const cell = row.getCell(j);
+      if (cell.getNumChildren() === 0) continue;
+      const paragraph = cell.getChild(0).asParagraph();
+      styleParagraph(paragraph, { family: 'Arial', size: 11, bold: i === 0 });
+    }
+  }
+  return table;
+}
+
+function appendNoDataParagraph(body, message){
+  styleParagraph(body.appendParagraph(message), { family: 'Arial', size: 11, italic: true });
+}
+
+function extractTopicTokens(topicCell){
+  const raw = clean(topicCell);
+  if (!raw) return [];
+  return raw.split(/[;,\|\/\n]+/).map(t => t.trim()).filter(Boolean);
+}
+
+function normalizeTopicLabel(topic){
+  const formatted = clean(prettyTopic(topic));
+  return formatted || 'Unspecified';
+}
+
+function isMarkedIncorrect(status){
+  const normalized = toLower(status);
+  return normalized === 'incorrect' || normalized === 'wrong' || normalized === 'incorrect answer' || normalized === 'not correct';
 }
 
 // =========================
@@ -1448,6 +1732,7 @@ function diffSet(aSet, bSet){
 function getSheet(name){ return SpreadsheetApp.getActive().getSheetByName(name); }
 function clean(s){ return (s == null ? '' : String(s)).trim(); }
 function toLower(s){ return clean(s).toLowerCase(); }
+function valueAt(row, index){ return (index == null || index < 0) ? '' : row[index]; }
 function randShuffle(arr){ for (let i=arr.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [arr[i],arr[j]]=[arr[j],arr[i]]; } return arr; }
 function parseList(s){ return clean(s).split(/[;,]/).map(x=>x.trim()).filter(Boolean); }
 function parseListSemicolon(s){ return clean(s).split(/[;]+/).map(x=>x.trim()).filter(Boolean); }
@@ -1501,6 +1786,13 @@ function highlightText(paragraph, textToHighlight) {
   const t = paragraph.editAsText();
   let f = t.findText(textToHighlight);
   while (f) { const s = f.getStartOffset(); const e = f.getEndOffsetInclusive(); if (s !== -1) t.setBold(s, e, true); f = t.findText(textToHighlight, f); }
+}
+
+function formatPercent(count, total){
+  if (!total) return '0%';
+  const pct = Math.round((count * 10000) / total) / 100;
+  const formatted = pct.toFixed(2).replace(/\.00$/, '').replace(/(\.\d)0$/, '$1');
+  return formatted + '%';
 }
 
 // date helpers
