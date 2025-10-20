@@ -79,7 +79,7 @@
     <div class="form-group"><label for="max-questions">Max Questions (Overall Cap)</label><input type="number" id="max-questions"></div>
     <div class="form-group"><input type="checkbox" id="shuffle" checked><label for="shuffle" style="display:inline-block;font-weight:normal;">Shuffle MCQ Choices</label></div>
     <div class="form-group"><input type="checkbox" id="show-topic-tag" checked><label for="show-topic-tag" style="display:inline-block;font-weight:normal;">Show Topic after question (end tag)</label></div>
-    <div class="form-group"><input type="checkbox" id="include-summary"><label for="include-summary" style="display:inline-block;font-weight:normal;">Include Difficulty Summary Page</label></div>
+    <div class="form-group"><input type="checkbox" id="include-summary"><label for="include-summary" style="display:inline-block;font-weight:normal;">Include Summary Page</label></div>
   </div>
 
   <button type="button" class="collapsible" id="btnQuotas">Quotas (Optional)</button>

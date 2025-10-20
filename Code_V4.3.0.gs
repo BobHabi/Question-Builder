@@ -7,9 +7,9 @@
  *    order-agnostic 18-column schema incl. Tags, robust Topic/Chapter import from various Notion property types.
  *
  * Menus:
- *  Exam Builder V4 → Open Exam Builder
- *  Notion Sync → Configure… / Preview Changes / Sync Down… / Sync Up (All rows in Import)
- *  Bank Tools → Merge / Upsert / Validate / Clear Highlights / Setup Last Practiced
+ *  Exam Builder V4 -> Open Exam Builder
+ *  Notion Sync -> Configure... / Preview Changes / Sync Down... / Sync Up (All rows in Import)
+ *  Bank Tools -> Merge / Upsert / Validate / Clear Highlights / Setup Last Practiced
  */
 
 // =========================
@@ -26,6 +26,9 @@ const PROP = PropertiesService.getScriptProperties();
 const NOTION_API_BASE = 'https://api.notion.com/v1';
 const NOTION_VERSION  = '2022-06-28'; // stable & widely supported
 const DBMAP_KEY       = 'NOTION_DB_MAP'; // JSON: { "BIO 1130":"dbid", "ANP 1111":"dbid", ... }
+const NOTION_RATE_LIMIT_MS = 400; // keep comfortably under Notion's 3 req/sec guidance
+
+const notionDbMetadataCache = {};
 
 // =========================
 // Menus
@@ -34,24 +37,25 @@ function onOpen() {
   const ui = SpreadsheetApp.getUi();
   ui.createMenu('Exam Builder V4')
     .addItem('Open Exam Builder', 'showSidebar')
+    .addItem('Print Question by Ref ID', 'printQuestionByRefId')
     .addSeparator()
     .addSubMenu(ui.createMenu('Notion Sync')
-      .addItem('Configure…', 'openNotionConfig')
+      .addItem('Configure...', 'openNotionConfig')
       .addItem('Preview Changes', 'notionPreview')
       .addSeparator()
-      .addItem('Sync Down…', 'openSyncDownFilters') // NEW picker & partial filters
-      .addItem('Sync Up (Import → Notion)', 'notionSyncUp')
+      .addItem('Sync Down...', 'openSyncDownFilters') // NEW picker & partial filters
+      .addItem('Sync Up (Import -> Notion)', 'notionSyncUp')
     )
     .addToUi();
 
   ui.createMenu('Bank Tools')
-    .addItem('Merge Import → Bank (append new)','mergeImportToBank')
-    .addItem('Upsert Import → Bank (update by Ref ID)','upsertImportToBank')
+    .addItem('Merge Import -> Bank (append new)','mergeImportToBank')
+    .addItem('Upsert Import -> Bank (update by Ref ID)','upsertImportToBank')
     .addSeparator()
     .addItem('Validate Bank Data', 'validateBankData')
     .addItem('Clear Validation Highlighting', 'clearValidationHighlighting')
     .addSeparator()
-    .addItem('Setup “Last Practiced” Column', 'setupLastPracticedColumn')
+    .addItem('Setup "Last Practiced" Column', 'setupLastPracticedColumn')
     .addToUi();
 }
 
@@ -60,6 +64,103 @@ function showSidebar() {
       .setTitle('Exam Builder V4.3.0')
       .setWidth(320);
   SpreadsheetApp.getUi().showSidebar(html);
+}
+
+function printQuestionByRefId(){
+  const ui = SpreadsheetApp.getUi();
+  const response = ui.prompt(
+    'Print Question by Ref ID',
+    'Enter the Ref ID to generate a single-question document with its answer:',
+    ui.ButtonSet.OK_CANCEL
+  );
+
+  if (response.getSelectedButton() !== ui.Button.OK) return;
+
+  const refInput = clean(response.getResponseText());
+  if (!refInput) {
+    ui.alert('Please enter a Ref ID.');
+    return;
+  }
+
+  const bankSheet = getSheet(SHEET_BANK);
+  if (!bankSheet) {
+    ui.alert('Error: "Bank" sheet not found.');
+    return;
+  }
+
+  const data = bankSheet.getDataRange().getValues();
+  if (data.length < 2) {
+    ui.alert('The "Bank" sheet does not contain any questions.');
+    return;
+  }
+
+  const headers = data[0].map(h => toLower(clean(h)));
+  const idxRef = headers.indexOf(toLower(REF_HEADER));
+  if (idxRef === -1) {
+    ui.alert(`Unable to find a "${REF_HEADER}" column in the "Bank" sheet.`);
+    return;
+  }
+
+  const columnIndexes = {
+    question: headers.indexOf('question'),
+    type: headers.indexOf('question type'),
+    course: headers.indexOf('course'),
+    topic: headers.indexOf('topic/chapter'),
+    difficulty: headers.indexOf('difficulty'),
+    correctStatus: headers.indexOf('correct/incorrect'),
+    myAnswer: headers.indexOf('my answer'),
+    source: headers.indexOf('source'),
+    choices: {
+      A: headers.indexOf('choice a'),
+      B: headers.indexOf('choice b'),
+      C: headers.indexOf('choice c'),
+      D: headers.indexOf('choice d'),
+      E: headers.indexOf('choice e')
+    },
+    answer: headers.indexOf('correct answer(s)'),
+    explanation: headers.indexOf('explanation'),
+    ref: idxRef
+  };
+
+  const targetRefLower = toLower(refInput);
+  const matches = [];
+  for (let r = 1; r < data.length; r++) {
+    const refValue = clean(data[r][idxRef]);
+    if (toLower(refValue) === targetRefLower) {
+      matches.push({ row: data[r], rowNumber: r + 1 });
+    }
+  }
+
+  if (matches.length === 0) {
+    ui.alert(`No question found with Ref ID "${refInput}".`);
+    return;
+  }
+
+  if (matches.length > 1) {
+    ui.alert(`Warning: Multiple questions share Ref ID "${refInput}". Using the first match on row ${matches[0].rowNumber}.`);
+  }
+
+  const questionRecord = buildQuestionRecordFromRow(matches[0].row, columnIndexes, refInput);
+  const renderItem = questionToRenderEntry(questionRecord, false);
+
+  const titleParts = [];
+  if (questionRecord.course) titleParts.push(questionRecord.course);
+  titleParts.push(`Ref ${questionRecord.refId}`);
+  const docTitle = titleParts.join(' - ') || `Ref ${questionRecord.refId}`;
+
+  const doc = DocumentApp.create(docTitle);
+  const body = doc.getBody();
+  body.clear();
+
+  styleParagraph(body.appendParagraph(docTitle), { size: 14, bold: true, family: 'Arial', center: true });
+  body.appendParagraph('');
+  renderStudent(body, [renderItem], '', true);
+  styleParagraph(body.appendParagraph('Answer Key'), { fontFamily: 'Georgia', size: 14, bold: true });
+  body.appendParagraph('');
+  renderAnswers(body, [renderItem], '', true);
+
+  doc.saveAndClose();
+  showDocLink(doc.getUrl(), 'Single-question document generated successfully.');
 }
 
 // =========================
@@ -103,7 +204,7 @@ function buildExamFromUI(config) {
   if (selected.length === 0) return 'Quota settings resulted in 0 questions. Try adjusting quotas or filters.';
 
   const courseName = clean(course) || 'Course';
-  const finalTitle = rawTitle ? `${courseName} - ${rawTitle}` : `${courseName} – Practice Exam`;
+  const finalTitle = rawTitle ? `${courseName} - ${rawTitle}` : `${courseName} - Practice Exam`;
 
   const doc = DocumentApp.create(finalTitle);
   const body = doc.getBody();
@@ -131,36 +232,19 @@ function buildExamFromUI(config) {
     renderAnswers(body, renderData, clean(config.searchText), showTopicAtEnd);
   }
 
-  // Optional Difficulty Summary Page
+  // Optional Summary Page
   const includeSummary = String(config.includeSummary) === 'true';
   if (includeSummary) {
     body.appendPageBreak();
-    styleParagraph(body.appendParagraph('Difficulty Summary'), { size: 14, bold: true, family: 'Arial' });
+    styleParagraph(body.appendParagraph('Summary Page'), { size: 14, bold: true, family: 'Arial' });
     body.appendParagraph('');
-
-    const counts = { 'Very Easy':0, 'Easy':0, 'Medium':0, 'Hard':0, 'Very Hard':0, '':0 };
-    renderData.forEach(q => {
-      const d = clean(q.difficulty);
-      if (counts.hasOwnProperty(d)) counts[d]++; else counts['']++;
-    });
-    const total = renderData.length || 1;
-    const rows = [['Difficulty','Count','Percent']];
-    ['Very Easy','Easy','Medium','Hard','Very Hard'].forEach(d=>{
-      const c = counts[d]||0;
-      const pct = Math.round((c*10000)/total)/100;
-      rows.push([d, String(c), pct+'%']);
-    });
-
-    const table = body.appendTable(rows);
-    table.setBorderWidth(0);
-    for (let i=0; i<table.getNumRows(); i++) {
-      const r = table.getRow(i);
-      for (let j=0; j<r.getNumCells(); j++) {
-        const cell = r.getCell(j);
-        const p = cell.getChild(0).asParagraph();
-        styleParagraph(p, { family:'Arial', size: 11, bold: i===0 });
-      }
-    }
+    appendDifficultySummarySection(body, renderData);
+    appendSummarySectionSpacer(body);
+    appendTopicsSummarySection(body, renderData);
+    appendSummarySectionSpacer(body);
+    appendIncorrectDifficultySummarySection(body, renderData);
+    appendSummarySectionSpacer(body);
+    appendIncorrectMyAnswerSummarySection(body, renderData);
   }
 
   doc.saveAndClose();
@@ -185,46 +269,63 @@ function prepareSelectionForBuild(config) {
     shuffleChoices, showTopicAtEnd
   } = filterAndSelect(config);
 
-  const renderData = orderedQuestions.map(q => ({
-    QT: q.QT_raw,
-    stem: stripLeadingNum(q.Q),
-    choices: [],
-    ansRaw: q.ANS,
-    ansMapped: null,
-    expl: q.EXPL || '',
-    refId: q.refId,
-    topics: q.topics,
-    difficulty: q.Difficulty || ''
-  }));
-
-  for (let i = 0; i < renderData.length; i++) {
-    const item = renderData[i];
-    const isMCQ = (item.QT || '').toLowerCase() === 'mcq';
-    if (!isMCQ) continue;
-    const source = orderedQuestions.find(x => x.refId === item.refId);
-    let choices = [
-      {label:'A', text: stripChoicePrefix(source.A)},
-      {label:'B', text: stripChoicePrefix(source.B)},
-      {label:'C', text: stripChoicePrefix(source.C)},
-      {label:'D', text: stripChoicePrefix(source.D)},
-      {label:'E', text: stripChoicePrefix(source.E)}
-    ].filter(ch => clean(ch.text) !== '');
-    if (String(shuffleChoices) === 'true' && choices.length > 1) {
-      randShuffle(choices);
-    }
-
-    const ansTokens = (source.ANS || '').split(/[,;]\s*/).map(x => x.trim().toUpperCase()).filter(Boolean);
-    let mapped = [];
-    ansTokens.forEach(tok => {
-      const idx = choices.findIndex(ch => ch.label === tok);
-      if (idx >= 0) mapped.push(['A','B','C','D','E'][idx]);
-    });
-
-    item.choices = choices.map((ch, idx) => ({ shown: ['a','b','c','d','e'][idx], text: ch.text }));
-    item.ansMapped = mapped.length ? mapped.join('; ') : source.ANS;
-  }
+  const renderData = orderedQuestions.map(q => questionToRenderEntry(q, shuffleChoices));
 
   return { selected: selectedQuestions, ordered: orderedQuestions, renderData, showTopicAtEnd, course, examTitle, examSubtitle };
+}
+
+function questionToRenderEntry(question, shuffleChoices){
+  const item = {
+    QT: question.QT_raw,
+    stem: stripLeadingNum(question.Q),
+    choices: [],
+    ansRaw: question.ANS,
+    ansMapped: question.ANS,
+    expl: question.EXPL || '',
+    refId: question.refId,
+    topics: question.topics,
+    difficulty: question.Difficulty || '',
+    correctStatus: question.correctStatus || '',
+    myAnswer: question.myAnswer || ''
+  };
+
+  const isMCQ = (item.QT || '').toLowerCase() === 'mcq';
+  if (!isMCQ) {
+    return item;
+  }
+
+  let choices = [
+    { label: 'A', text: stripChoicePrefix(question.A) },
+    { label: 'B', text: stripChoicePrefix(question.B) },
+    { label: 'C', text: stripChoicePrefix(question.C) },
+    { label: 'D', text: stripChoicePrefix(question.D) },
+    { label: 'E', text: stripChoicePrefix(question.E) }
+  ].filter(ch => clean(ch.text) !== '');
+
+  if (String(shuffleChoices) === 'true' && choices.length > 1) {
+    randShuffle(choices);
+  }
+
+  const ansTokens = (question.ANS || '').split(/[,;]\s*/).map(x => x.trim().toUpperCase()).filter(Boolean);
+  const mapped = [];
+  ansTokens.forEach(tok => {
+    const idx = choices.findIndex(ch => ch.label === tok);
+    if (idx >= 0) {
+      mapped.push(['A','B','C','D','E'][idx]);
+    }
+  });
+
+  if (mapped.length > 0) {
+    item.ansMapped = mapped.join('; ');
+  }
+
+  item.choices = choices.map((ch, idx) => ({
+    shown: ['a','b','c','d','e'][idx],
+    label: ch.label,
+    text: ch.text
+  }));
+
+  return item;
 }
 
 function computeCountsOnly(config) {
@@ -255,6 +356,11 @@ function filterAndSelect(config, countsOnly) {
   const cleanSearchText   = clean(searchText);
   const showTopicAtEnd    = (String(showTopicTag) === 'true');
 
+  const diffSet = new Set(diffList.map(v => toLower(v)));
+  const typeSet = new Set(typeList.map(v => toLower(v)));
+  const corrSet = new Set(corrList.map(v => toLower(v)));
+  const myAnsSet = new Set(myAnsList.map(v => clean(v)));
+
   const practicedWithinDate = practicedWithinDays ? daysAgo(toIntOrZero(practicedWithinDays)) : null;
   const notPracticedDate    = notPracticedDays ? daysAgo(toIntOrZero(notPracticedDays)) : null;
 
@@ -275,41 +381,56 @@ function filterAndSelect(config, countsOnly) {
   const cAns=col('correct answer(s)'), cExpl=col('explanation'), cRef=col('ref id');
   const cLastPracticed = colByAny(['Last Practiced', 'Last Practiced Date'], headers);
 
+  const columnIndexes = {
+    question: cQ,
+    type: cT,
+    course: cCourse,
+    topic: cTopic,
+    difficulty: cDiff,
+    correctStatus: cCI,
+    myAnswer: cMyAns,
+    source: cSource,
+    choices: { A: cA, B: cB, C: cC, D: cD, E: cE },
+    answer: cAns,
+    explanation: cExpl,
+    ref: cRef
+  };
+
   let rows = [];
   for (let r = 1; r < bankData.length; r++) {
     const row = bankData[r];
 
-    if (toLower(row[cCourse]) !== toLower(course)) continue;
+    const rowRecord = buildQuestionRecordFromRow(row, columnIndexes, 'R' + (r + 1));
 
-    const rowTopicLower = toLower(row[cTopic]);
+    if (toLower(rowRecord.course) !== toLower(course)) continue;
+
+    const rowTopicLower = toLower(rowRecord.topics);
     if (topicsList.length > 0 && !cellContainsAny(rowTopicLower, topicsList)) continue;
     if (excludeTopicsList.length > 0 && cellContainsAny(rowTopicLower, excludeTopicsList)) continue;
 
-    const rowDiffLower = toLower(row[cDiff]);
-    if (diffList.length > 0 && !diffList.map(toLower).includes(rowDiffLower)) continue;
+    const rowDiffLower = toLower(rowRecord.Difficulty);
+    if (diffSet.size > 0 && !diffSet.has(rowDiffLower)) continue;
 
-    const rowTypeLower = toLower(row[cT]);
-    if (typeList.length > 0 && !typeList.map(toLower).includes(rowTypeLower)) continue;
+    const rowTypeLower = rowRecord.QT_clean;
+    if (typeSet.size > 0 && !typeSet.has(rowTypeLower)) continue;
 
-    const rowCorrectStatusLower = (cCI > -1) ? toLower(row[cCI]) : '';
-    if (corrList.length > 0 && !corrList.map(toLower).includes(rowCorrectStatusLower)) continue;
+    const rowCorrectStatusLower = toLower(rowRecord.correctStatus);
+    if (corrSet.size > 0 && !corrSet.has(rowCorrectStatusLower)) continue;
 
-    const rowMyAns = (cMyAns > -1) ? clean(row[cMyAns]) : '';
-    if (myAnsList.length > 0 && !myAnsList.includes(rowMyAns)) continue;
+    const rowMyAns = rowRecord.myAnswer;
+    if (myAnsSet.size > 0 && !myAnsSet.has(rowMyAns)) continue;
 
-    const rowSourceLower = (cSource > -1) ? toLower(row[cSource]) : '';
+    const rowSourceLower = toLower(rowRecord.source);
     if (sourceList.length > 0 && !sourceList.some(s => rowSourceLower.includes(s))) continue;
     if (excludeSourceList.length > 0 && excludeSourceList.some(s => rowSourceLower.includes(s))) continue;
 
-    const rowQuestionText = clean(row[cQ]);
-    const chA = clean(row[cA]), chB = clean(row[cB]), chC = clean(row[cC]), chD = clean(row[cD]), chE = clean(row[cE]);
+    const rowQuestionText = rowRecord.Q;
+    const chA = rowRecord.A, chB = rowRecord.B, chC = rowRecord.C, chD = rowRecord.D, chE = rowRecord.E;
     if (cleanSearchText) {
       const needle = toLower(cleanSearchText);
       const hay = toLower([rowQuestionText, chA, chB, chC, chD, chE].filter(Boolean).join(' || '));
       if (!hay.includes(needle)) continue;
     }
-    const rowExplanationText = (cExpl > -1) ? clean(row[cExpl]) : '';
-
     const lastPracticedRaw  = (cLastPracticed > -1) ? row[cLastPracticed] : null;
     const lastPracticedDate = parseDateValue(lastPracticedRaw);
 
@@ -327,17 +448,7 @@ function filterAndSelect(config, countsOnly) {
       if (startOfDay(lastPracticedDate) > cutoffNP) continue;
     }
 
-    rows.push({
-      Q: rowQuestionText,
-      QT_raw: clean(row[cT]),
-      QT_clean: rowTypeLower,
-      Difficulty: clean(row[cDiff]),
-      topics: clean(row[cTopic]),
-      refId: clean(row[cRef]) || ('R' + (r + 1)),
-      A: chA, B: chB, C: chC, D: chD, E: chE,
-      ANS: clean(row[cAns]),
-      EXPL: rowExplanationText
-    });
+    rows.push(rowRecord);
   }
 
   const matchedCount = rows.length;
@@ -389,6 +500,30 @@ function filterAndSelect(config, countsOnly) {
   return { selectedQuestions, orderedQuestions, matchedCount, course, examTitle, examSubtitle, shuffleChoices, showTopicAtEnd };
 }
 
+function buildQuestionRecordFromRow(row, columnIndexes, fallbackRefId){
+  const question = {
+    Q: clean(valueAt(row, columnIndexes.question)),
+    QT_raw: clean(valueAt(row, columnIndexes.type)),
+    Difficulty: clean(valueAt(row, columnIndexes.difficulty)),
+    topics: clean(valueAt(row, columnIndexes.topic)),
+    refId: clean(valueAt(row, columnIndexes.ref)) || fallbackRefId,
+    A: clean(valueAt(row, columnIndexes.choices.A)),
+    B: clean(valueAt(row, columnIndexes.choices.B)),
+    C: clean(valueAt(row, columnIndexes.choices.C)),
+    D: clean(valueAt(row, columnIndexes.choices.D)),
+    E: clean(valueAt(row, columnIndexes.choices.E)),
+    ANS: clean(valueAt(row, columnIndexes.answer)),
+    EXPL: clean(valueAt(row, columnIndexes.explanation)),
+    correctStatus: clean(valueAt(row, columnIndexes.correctStatus)),
+    myAnswer: clean(valueAt(row, columnIndexes.myAnswer)),
+    course: clean(valueAt(row, columnIndexes.course)),
+    source: clean(valueAt(row, columnIndexes.source))
+  };
+
+  question.QT_clean = toLower(question.QT_raw);
+  return question;
+}
+
 // =========================
 // Rendering
 // =========================
@@ -430,6 +565,163 @@ function renderAnswers(body, render, searchText, showTopicAtEnd){
     if(q.expl){ const p=body.appendParagraph('Explanation: '+q.expl); styleParagraph(p,{fontFamily:'Georgia',size:12}); highlightText(p, searchText); }
     body.appendParagraph('');
   }
+}
+
+function appendSummarySectionSpacer(body){ if(body) body.appendParagraph(''); }
+
+function appendDifficultySummarySection(body, renderData){
+  styleParagraph(body.appendParagraph('Difficulty Summary'), { size: 12, bold: true, family: 'Arial' });
+  const counts = { other: 0 };
+  DIFF_ORDER.forEach(d => { counts[d] = 0; });
+
+  renderData.forEach(q => {
+    const difficulty = clean(q.difficulty);
+    if (counts.hasOwnProperty(difficulty)) {
+      counts[difficulty]++;
+    } else {
+      counts.other++;
+    }
+  });
+
+  const total = renderData.length;
+  const rows = [['Difficulty','Count','Percent']];
+  DIFF_ORDER.forEach(diff => {
+    const count = counts[diff] || 0;
+    rows.push([diff, String(count), formatPercent(count, total)]);
+  });
+  if (counts.other) {
+    rows.push(['Other/Unspecified', String(counts.other), formatPercent(counts.other, total)]);
+  }
+
+  appendSummaryTable(body, rows);
+}
+
+function appendTopicsSummarySection(body, renderData){
+  styleParagraph(body.appendParagraph('Topics Summary'), { size: 12, bold: true, family: 'Arial' });
+  const total = renderData.length;
+  const counts = new Map();
+
+  renderData.forEach(q => {
+    const topicTokens = extractTopicTokens(q.topics);
+    if (topicTokens.length === 0) {
+      topicTokens.push('Unspecified');
+    }
+    const uniqueTokens = Array.from(new Set(topicTokens.map(normalizeTopicLabel)));
+    uniqueTokens.forEach(tok => counts.set(tok, (counts.get(tok) || 0) + 1));
+  });
+
+  if (counts.size === 0) {
+    appendNoDataParagraph(body, 'No topic data available.');
+    return;
+  }
+
+  const rows = [['Topic','Count','Percent']];
+  Array.from(counts.entries())
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .forEach(([topic, count]) => {
+      rows.push([topic, String(count), formatPercent(count, total)]);
+    });
+
+  appendSummaryTable(body, rows);
+}
+
+function appendIncorrectDifficultySummarySection(body, renderData){
+  styleParagraph(body.appendParagraph('Incorrect Difficulty Summary'), { size: 12, bold: true, family: 'Arial' });
+  const incorrect = renderData.filter(q => isMarkedIncorrect(q.correctStatus));
+  const totalIncorrect = incorrect.length;
+  if (totalIncorrect === 0) {
+    appendNoDataParagraph(body, 'No incorrect answers recorded.');
+    return;
+  }
+
+  styleParagraph(body.appendParagraph('Total incorrect answers: ' + totalIncorrect), { family: 'Arial', size: 11 });
+
+  const counts = { other: 0 };
+  DIFF_ORDER.forEach(d => { counts[d] = 0; });
+  incorrect.forEach(q => {
+    const difficulty = clean(q.difficulty);
+    if (counts.hasOwnProperty(difficulty)) {
+      counts[difficulty]++;
+    } else {
+      counts.other++;
+    }
+  });
+
+  const rows = [['Difficulty','Count','Percent']];
+  DIFF_ORDER.forEach(diff => {
+    const count = counts[diff] || 0;
+    rows.push([diff, String(count), formatPercent(count, totalIncorrect)]);
+  });
+  if (counts.other) {
+    rows.push(['Other/Unspecified', String(counts.other), formatPercent(counts.other, totalIncorrect)]);
+  }
+
+  appendSummaryTable(body, rows);
+}
+
+function appendIncorrectMyAnswerSummarySection(body, renderData){
+  styleParagraph(body.appendParagraph('Incorrect My Answer Summary'), { size: 12, bold: true, family: 'Arial' });
+  const incorrect = renderData.filter(q => isMarkedIncorrect(q.correctStatus));
+  const totalIncorrect = incorrect.length;
+  if (totalIncorrect === 0) {
+    appendNoDataParagraph(body, 'No incorrect answers recorded.');
+    return;
+  }
+
+  const answerBuckets = { '0': 0, '50': 0, '75': 0, '100': 0, other: 0 };
+  incorrect.forEach(q => {
+    const answer = clean(q.myAnswer);
+    const bucketKey = answerBuckets.hasOwnProperty(answer) ? answer : 'other';
+    answerBuckets[bucketKey]++;
+  });
+
+  styleParagraph(body.appendParagraph('Total incorrect answers: ' + totalIncorrect), { family: 'Arial', size: 11 });
+
+  const rows = [['My Answer','Count','Percent']];
+  ['0','50','75','100'].forEach(val => {
+    const count = answerBuckets[val] || 0;
+    rows.push([val, String(count), formatPercent(count, totalIncorrect)]);
+  });
+  if (answerBuckets.other) {
+    rows.push(['Other/Unspecified', String(answerBuckets.other), formatPercent(answerBuckets.other, totalIncorrect)]);
+  }
+
+  appendSummaryTable(body, rows);
+}
+
+function appendSummaryTable(body, rows){
+  const table = body.appendTable(rows);
+  table.setBorderWidth(0);
+  for (let i = 0; i < table.getNumRows(); i++) {
+    const row = table.getRow(i);
+    for (let j = 0; j < row.getNumCells(); j++) {
+      const cell = row.getCell(j);
+      if (cell.getNumChildren() === 0) continue;
+      const paragraph = cell.getChild(0).asParagraph();
+      styleParagraph(paragraph, { family: 'Arial', size: 11, bold: i === 0 });
+    }
+  }
+  return table;
+}
+
+function appendNoDataParagraph(body, message){
+  styleParagraph(body.appendParagraph(message), { family: 'Arial', size: 11, italic: true });
+}
+
+function extractTopicTokens(topicCell){
+  const raw = clean(topicCell);
+  if (!raw) return [];
+  return raw.split(/[;,\|\/\n]+/).map(t => t.trim()).filter(Boolean);
+}
+
+function normalizeTopicLabel(topic){
+  const formatted = clean(prettyTopic(topic));
+  return formatted || 'Unspecified';
+}
+
+function isMarkedIncorrect(status){
+  const normalized = toLower(status);
+  return normalized === 'incorrect' || normalized === 'wrong' || normalized === 'incorrect answer' || normalized === 'not correct';
 }
 
 // =========================
@@ -533,15 +825,66 @@ function setupLastPracticedColumn(){
   const lastRow=Math.max(2,s.getLastRow()); const col=c+1; s.getRange(2,col,lastRow-1,1).setNumberFormat('MM/dd/yyyy');
   const rule=SpreadsheetApp.newDataValidation().requireDate().setAllowInvalid(true).build();
   s.getRange(2,col,s.getMaxRows()-1,1).setDataValidation(rule);
-  SpreadsheetApp.getUi().alert('“Last Practiced” column formatted as MM/DD/YYYY with a date picker.');
+  SpreadsheetApp.getUi().alert('"Last Practiced" column formatted as MM/DD/YYYY with a date picker.');
 }
 
 // =========================
 // Notion Sync: UI wiring
 // =========================
 function openNotionConfig(){
-  const html = HtmlService.createHtmlOutputFromFile('NotionConfig').setWidth(520).setHeight(520);
-  SpreadsheetApp.getUi().showModalDialog(html, 'Notion Sync • Configuration');
+  const ui = SpreadsheetApp.getUi();
+  const htmlFileCandidates = ['NotionConfig_V4.3.0', 'NotionConfig'];
+  let html = null;
+  let lastError = null;
+
+  for (let i = 0; i < htmlFileCandidates.length; i++){
+    try {
+      html = HtmlService.createHtmlOutputFromFile(htmlFileCandidates[i]);
+      break;
+    } catch (err) {
+      lastError = err;
+    }
+  }
+
+  if (!html){
+    if (lastError){
+      throw lastError;
+    }
+    throw new Error('Notion configuration dialog HTML file not found.');
+  }
+
+  html.setWidth(520).setHeight(520);
+  ui.showModalDialog(html, 'Notion Sync - Configuration');
+}
+
+function readNotionConfig(){
+  const map = getDbMap();
+  return {
+    hasToken: Boolean(PROP.getProperty('NOTION_TOKEN')),
+    dbMap: map
+  };
+}
+
+function saveNotionConfig(payload){
+  if (!payload || typeof payload !== 'object') {
+    throw new Error('Invalid configuration payload.');
+  }
+
+  if (payload.dbMap) {
+    setDbMap(payload.dbMap);
+  }
+
+  if (payload.clearToken) {
+    PROP.deleteProperty('NOTION_TOKEN');
+  } else if (Object.prototype.hasOwnProperty.call(payload, 'token')) {
+    const token = clean(payload.token);
+    if (!token) {
+      throw new Error('Token cannot be empty. Use "Clear Token" if you intend to remove it.');
+    }
+    PROP.setProperty('NOTION_TOKEN', token);
+  }
+
+  return 'Configuration saved successfully.';
 }
 
 // NEW: Sync Down Filters dialog (inline HTML, no extra file)
@@ -560,57 +903,133 @@ function openSyncDownFilters(){
         .btns { margin-top: 16px; display:flex; gap:10px; }
         button { background:#1a73e8; color:#fff; border:none; padding:10px 14px; border-radius:8px; cursor:pointer; font-weight:700; }
         button.secondary { background:#5f6368; }
+        button.disabled { opacity:0.6; cursor:default; }
         small { color:#5f6368; display:block; margin-top:4px; }
+        #message { margin-top:12px; font-size:12px; display:none; }
       </style>
     </head>
     <body>
-      <h3>Sync Down • Filters</h3>
-      <label>Course</label>
+      <h3>Sync Down - Filters</h3>
+      <label for="course">Course</label>
       <select id="course">
         <option value="__ALL__">All configured courses</option>
         ${courseOptions}
       </select>
-      <label>Ref ID prefix (optional)</label>
+      <label for="refPrefix">Ref ID prefix (optional)</label>
       <input id="refPrefix" placeholder="e.g., BIO-">
       <div class="row">
         <div>
-          <label>Ref ID range start (optional)</label>
+          <label for="refStart">Ref ID range start (optional)</label>
           <input id="refStart" placeholder="e.g., BIO-0001">
         </div>
         <div>
-          <label>Ref ID range end (optional)</label>
+          <label for="refEnd">Ref ID range end (optional)</label>
           <input id="refEnd" placeholder="e.g., BIO-0500">
         </div>
       </div>
-      <label>Topic/Chapter contains (semicolon list)</label>
+      <label for="topics">Topic/Chapter contains (semicolon list)</label>
       <input id="topics" placeholder="e.g., T/Ch 01; Topic 5">
-      <label>Tags include ANY (semicolon list)</label>
+      <label for="tags">Tags include ANY (semicolon list)</label>
       <input id="tags" placeholder="e.g., genetics; exam1; image-required">
-      <label>Last Edited Since (YYYY-MM-DD) (optional)</label>
+      <label for="lastEdited">Last Edited Since (YYYY-MM-DD) (optional)</label>
       <input id="lastEdited" placeholder="e.g., 2025-09-01">
+      <div id="message" role="alert"></div>
       <div class="btns">
-        <button onclick="run()">Sync Down</button>
-        <button class="secondary" onclick="google.script.host.close()">Cancel</button>
+        <button id="runBtn" type="button">Sync Down</button>
+        <button id="cancelBtn" type="button" class="secondary">Cancel</button>
       </div>
       <script>
-        function val(id){ return document.getElementById(id).value.trim(); }
-        function run(){
-          const payload = {
-            course: val('course'),
-            refPrefix: val('refPrefix'),
-            refStart: val('refStart'),
-            refEnd: val('refEnd'),
-            topics: val('topics'),
-            tags: val('tags'),
-            lastEdited: val('lastEdited')
-          };
-          google.script.run.withSuccessHandler(function(msg){ alert(msg); google.script.host.close(); }).runSyncDownWithFilters(payload);
-        }
+        (function(){
+          const runBtn = document.getElementById('runBtn');
+          const cancelBtn = document.getElementById('cancelBtn');
+          const message = document.getElementById('message');
+          const inputs = Array.from(document.querySelectorAll('input, select'));
+
+          function setMessage(text, isError){
+            if (!message) return;
+            if (!text){
+              message.style.display = 'none';
+              message.textContent = '';
+              return;
+            }
+            message.style.display = 'block';
+            message.style.color = isError ? '#d93025' : '#188038';
+            message.textContent = text;
+          }
+
+          function setBusy(isBusy){
+            inputs.forEach(el => { el.disabled = Boolean(isBusy); });
+            [runBtn, cancelBtn].forEach(btn => {
+              if (!btn) return;
+              btn.disabled = Boolean(isBusy && btn === runBtn);
+              btn.classList.toggle('disabled', Boolean(isBusy && btn === runBtn));
+            });
+            if (isBusy){
+              setMessage('Sync in progress...', false);
+            } else {
+              setMessage('', false);
+            }
+          }
+
+          function valueOf(id){
+            const el = document.getElementById(id);
+            return el ? el.value.trim() : '';
+          }
+
+          function gather(){
+            return {
+              course: valueOf('course'),
+              refPrefix: valueOf('refPrefix'),
+              refStart: valueOf('refStart'),
+              refEnd: valueOf('refEnd'),
+              topics: valueOf('topics'),
+              tags: valueOf('tags'),
+              lastEdited: valueOf('lastEdited')
+            };
+          }
+
+          function handleSuccess(msg){
+            setBusy(false);
+            alert(msg);
+            google.script.host.close();
+          }
+
+          function handleFailure(err){
+            setBusy(false);
+            var text = 'An unexpected error occurred.';
+            if (err){
+              if (typeof err === 'string') {
+                text = err;
+              } else if (err.message) {
+                text = err.message;
+              } else {
+                text = String(err);
+              }
+            }
+            setMessage(text, true);
+          }
+
+          if (cancelBtn){
+            cancelBtn.addEventListener('click', function(){
+              google.script.host.close();
+            });
+          }
+
+          if (runBtn){
+            runBtn.addEventListener('click', function(){
+              setBusy(true);
+              google.script.run
+                .withSuccessHandler(handleSuccess)
+                .withFailureHandler(handleFailure)
+                .runSyncDownWithFilters(gather());
+            });
+          }
+        })();
       </script>
     </body>
     </html>
-  `).setWidth(520).setHeight(560);
-  SpreadsheetApp.getUi().showModalDialog(html, 'Sync Down • Filters');
+  `).setWidth(520).setHeight(580);
+  SpreadsheetApp.getUi().showModalDialog(html, 'Sync Down - Filters');
 }
 
 function htmlEscape(s){ return String(s||'').replace(/[&<>"']/g, m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m])); }
@@ -619,50 +1038,84 @@ function htmlEscape(s){ return String(s||'').replace(/[&<>"']/g, m=>({ '&':'&amp
 function runSyncDownWithFilters(filters){
   const cfg = requireNotionConfig();
   const dbMap = getDbMap();
-  if (!Object.keys(dbMap).length) throw new Error('No courses configured in Notion Sync → Configure…');
+  const courseNames = Object.keys(dbMap);
+  if (!courseNames.length) throw new Error('No courses configured in Notion Sync -> Configure...');
 
   const importSheet = getSheet(SHEET_IMPORT); if(!importSheet) throw new Error('Import sheet missing.');
   ensureCanonicalHeaders(importSheet);
 
-  // Determine which courses to pull
   const targets = [];
   if (filters.course && filters.course !== '__ALL__') {
     const dbid = dbMap[filters.course];
     if (dbid) targets.push({ name: filters.course, id: dbid });
   } else {
-    Object.keys(dbMap).forEach(name => targets.push({ name, id: dbMap[name] }));
+    courseNames.forEach(name => targets.push({ name, id: dbMap[name] }));
   }
 
-  const headerRow = importSheet.getRange(1,1,1,importSheet.getLastColumn()).getValues()[0];
-  const headersLower = headerRow.map(h=>toLower(h));
-  const cRef = headersLower.indexOf(toLower(REF_HEADER));
-  const importData = importSheet.getDataRange().getValues();
-  const mapRow = new Map(importData.slice(1).map((r,i)=>[clean(r[cRef]), i+2]));
+  if (!targets.length) {
+    throw new Error('No matching courses found for the selected filter.');
+  }
 
-  let updates=0, adds=0, fetched=0;
+  const numCols = CANON_HEADERS.length;
+  const lastRowWithData = importSheet.getLastRow();
+  const rowsToRead = Math.max(1, lastRowWithData);
+  const importData = importSheet.getRange(1, 1, rowsToRead, numCols).getValues();
+  const existingRows = importData.length > 1 ? importData.slice(1) : [];
+  const headersLower = CANON_HEADERS.map(h => toLower(h));
+  const cRef = headersLower.indexOf(toLower(REF_HEADER));
+  if (cRef === -1) {
+    throw new Error('Import sheet is missing the Ref ID column.');
+  }
+  const existingRefToIndex = new Map();
+  existingRows.forEach((row, idx) => {
+    const ref = clean(row[cRef]);
+    if (ref) existingRefToIndex.set(ref, idx);
+  });
+
+  const newRows = [];
+  const seenNewRefs = new Set();
+  let updates = 0, adds = 0, fetched = 0;
 
   targets.forEach(t => {
-    const rows = fetchNotionDbAsRowsFiltered(t.id, t.name, filters);
+    const rows = fetchNotionDbAsRowsFiltered(t.id, t.name, filters, cfg);
     fetched += rows.length;
-    rows.forEach(r=>{
-      const ref = clean(r[cRef]); if(!ref) return;
-      if (mapRow.has(ref)) {
-        importSheet.getRange(mapRow.get(ref), 1, 1, r.length).setValues([r]); updates++;
-      } else {
-        importSheet.appendRow(r); adds++;
+    rows.forEach(r => {
+      const ref = clean(r[cRef]);
+      if (!ref) return;
+      if (existingRefToIndex.has(ref)) {
+        existingRows[existingRefToIndex.get(ref)] = r;
+        updates++;
+      } else if (!seenNewRefs.has(ref)) {
+        newRows.push(r);
+        seenNewRefs.add(ref);
+        adds++;
       }
     });
-    Utilities.sleep(120);
   });
+
+  if (existingRows.length) {
+    importSheet.getRange(2, 1, existingRows.length, numCols).setValues(existingRows);
+  }
+
+  if (newRows.length) {
+    const lastRowBeforeInsert = importSheet.getLastRow();
+    const anchorRow = Math.max(1, lastRowBeforeInsert);
+    importSheet.insertRowsAfter(anchorRow, newRows.length);
+    importSheet.getRange(anchorRow + 1, 1, newRows.length, numCols).setValues(newRows);
+  }
 
   return `Sync Down complete.\nFetched: ${fetched}\nUpdated in Import: ${updates}\nAdded to Import: ${adds}`;
 }
 
-// Back-compat Preview (counts by Ref IDs vs Import) – iterates all configured DBs
+// Back-compat Preview (counts by Ref IDs vs Import) - iterates all configured DBs
 function notionPreview(){
   const cfg = requireNotionConfig();
   const dbMap = getDbMap();
   const courses = Object.keys(dbMap);
+  if (!courses.length) {
+    SpreadsheetApp.getUi().alert('No courses configured. Use Notion Sync -> Configure... to add database IDs.');
+    return;
+  }
   const notionIndex = {};
   courses.forEach(c => { notionIndex[c] = indexNotionRefs(dbMap[c], cfg); });
   const importIndex = indexSheet(getSheet(SHEET_IMPORT));
@@ -675,10 +1128,13 @@ function notionPreview(){
     newForNotion[k] = diffSet(subset, notionIndex[k]);
   });
 
-  let lines = ['Preview (by Ref ID)', '', 'From Notion → Import (new in Notion):'];
-  courses.forEach(k => lines.push(` ${k}: ${newInNotion[k].size}`));
-  lines.push('', 'From Import → Notion (new in Import):');
-  courses.forEach(k => lines.push(` ${k}: ${newForNotion[k].size}`));
+  const totalNewInNotion = courses.reduce((sum, k) => sum + (newInNotion[k] ? newInNotion[k].size : 0), 0);
+  const totalNewForNotion = courses.reduce((sum, k) => sum + (newForNotion[k] ? newForNotion[k].size : 0), 0);
+
+  let lines = ['Preview (by Ref ID)', '', `From Notion -> Import (new in Notion): ${totalNewInNotion}`];
+  courses.forEach(k => lines.push(`  ${k}: ${newInNotion[k].size}`));
+  lines.push('', `From Import -> Notion (new in Import): ${totalNewForNotion}`);
+  courses.forEach(k => lines.push(`  ${k}: ${newForNotion[k].size}`));
   SpreadsheetApp.getUi().alert(lines.join('\n'));
 }
 
@@ -687,17 +1143,18 @@ function notionSyncUp(){
   const importSheet = getSheet(SHEET_IMPORT); if(!importSheet) throw new Error('Import sheet missing.');
   const data = importSheet.getDataRange().getValues(); if(data.length < 2){ SpreadsheetApp.getUi().alert('Import is empty.'); return; }
   const headers = data[0]; const rows = data.slice(1);
+  const dbMap = getDbMap();
 
   let created=0, updated=0, skipped=0, errors=0;
   rows.forEach(row=>{
     const rec = rowToRecord(headers, row);
     if (!rec.RefID || !rec.Course) { skipped++; return; }
-    const dbId = courseToDbId(rec.Course);
+    const dbId = courseToDbId(rec.Course, dbMap);
     if (!dbId) { skipped++; return; }
     try {
-      const pageId = findPageIdByRefId(dbId, rec.RefID, requireNotionConfig());
-      if (pageId) { updateNotionPage(pageId, rec, requireNotionConfig()); updated++; }
-      else { createNotionPage(dbId, rec, requireNotionConfig()); created++; }
+      const pageId = findPageIdByRefId(dbId, rec.RefID, cfg);
+      if (pageId) { updateNotionPage(pageId, rec, cfg); updated++; }
+      else { createNotionPage(dbId, rec, cfg); created++; }
     } catch (e) { errors++; Logger.log(e); }
   });
 
@@ -709,17 +1166,33 @@ function notionSyncUp(){
 // =========================
 function requireNotionConfig(){
   const token = PROP.getProperty('NOTION_TOKEN');
-  if(!token){ throw new Error('Notion token missing. Use Notion Sync → Configure…'); }
+  if(!token){ throw new Error('Notion token missing. Use Notion Sync -> Configure...'); }
   return { token };
 }
 
 function getDbMap(){
   const raw = PROP.getProperty(DBMAP_KEY) || '{}';
-  try { const m = JSON.parse(raw); if (m && typeof m === 'object') return m; } catch(e){}
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object') {
+      const sanitized = sanitizeCourseMap(parsed, { strict: false });
+      const parsedString = JSON.stringify(parsed || {});
+      const sanitizedString = JSON.stringify(sanitized);
+      if (parsedString !== sanitizedString) {
+        PROP.setProperty(DBMAP_KEY, sanitizedString);
+      }
+      return sanitized;
+    }
+  } catch(e){}
   return {};
 }
 function setDbMap(obj){
-  PROP.setProperty(DBMAP_KEY, JSON.stringify(obj || {}));
+  const sanitized = sanitizeCourseMap(obj, { strict: true });
+  PROP.setProperty(DBMAP_KEY, JSON.stringify(sanitized));
+  const validDbIds = new Set(Object.values(sanitized));
+  Object.keys(notionDbMetadataCache).forEach(dbId => {
+    if (!validDbIds.has(dbId)) delete notionDbMetadataCache[dbId];
+  });
 }
 
 function notionRequest(path, method, payload, cfg){
@@ -731,76 +1204,201 @@ function notionRequest(path, method, payload, cfg){
     muteHttpExceptions: true
   };
   if (payload) options.payload = JSON.stringify(payload);
-  const resp = UrlFetchApp.fetch(url, options);
-  const code = resp.getResponseCode();
-  if (code >= 200 && code < 300) return JSON.parse(resp.getContentText());
-  throw new Error('Notion API error '+code+': '+resp.getContentText());
+
+  const maxAttempts = 5;
+  let attempt = 0;
+  let delay = NOTION_RATE_LIMIT_MS;
+  let lastError = null;
+
+  while (attempt < maxAttempts) {
+    attempt++;
+    try {
+      const resp = UrlFetchApp.fetch(url, options);
+      const code = resp.getResponseCode();
+      const body = resp.getContentText();
+      if (code >= 200 && code < 300) {
+        const parsed = body ? JSON.parse(body) : {};
+        Utilities.sleep(NOTION_RATE_LIMIT_MS);
+        return parsed;
+      }
+
+      const errMsg = 'Notion API error ' + code + ': ' + body;
+      if (code === 429 || code >= 500) {
+        lastError = new Error(errMsg);
+      } else {
+        throw new Error(errMsg);
+      }
+    } catch (e) {
+      lastError = e;
+    }
+
+    if (attempt >= maxAttempts) break;
+    Utilities.sleep(delay);
+    delay = Math.min(delay * 2, 5000);
+  }
+
+  throw lastError || new Error('Unknown Notion API error.');
+}
+
+function describeNotionDatabase(dbId, cfg){
+  if (!dbId) return null;
+  if (!notionDbMetadataCache[dbId]) {
+    notionDbMetadataCache[dbId] = notionRequest('/databases/' + dbId, 'get', null, cfg);
+  }
+  return notionDbMetadataCache[dbId];
 }
 
 // Filtered fetch
-function fetchNotionDbAsRowsFiltered(dbId, courseName, filters){
-  const rows=[]; let cursor=null;
-  const apiFilter = buildNotionApiFilter(filters);
-  do{
+function fetchNotionDbAsRowsFiltered(dbId, courseName, filters, cfg){
+  const rows = [];
+  let cursor = null;
+  const config = cfg || requireNotionConfig();
+  const dbMeta = describeNotionDatabase(dbId, config);
+  const filterPlan = buildNotionFilterPlan(filters, dbMeta);
+
+  do {
     const payload = { page_size: 100 };
-    if (apiFilter) payload.filter = apiFilter;
+    if (filterPlan.notion) payload.filter = filterPlan.notion;
     if (cursor) payload.start_cursor = cursor;
-    const res = notionRequest('/databases/'+dbId+'/query', 'post', payload, requireNotionConfig());
-    (res.results||[]).forEach(page=>{
+    const res = notionRequest('/databases/' + dbId + '/query', 'post', payload, config);
+    (res.results || []).forEach(page => {
       const props = page.properties || {};
       const rec = notionPropsToRecord(props);
       rec.Course = courseName;
+      if (!passesClientFilters(rec, filterPlan.clientFilters)) return;
       rows.push(recordToRow(rec));
     });
     cursor = res.has_more ? res.next_cursor : null;
-    Utilities.sleep(80);
-  } while(cursor);
+  } while (cursor);
 
-  // Client-side additional filters (Ref ID range)
-  const refStart = clean(filters.refStart);
-  const refEnd = clean(filters.refEnd);
-  if (refStart || refEnd){
-    const idx = CANON_HEADERS.map(h=>toLower(h)).indexOf(toLower(REF_HEADER));
-    const inRange = r => {
-      const rid = clean(r[idx]);
-      if (refStart && rid < refStart) return false;
-      if (refEnd && rid > refEnd) return false;
-      return true;
-    };
-    return rows.filter(inRange);
-  }
-  return rows;
+  return applyRefRangeFilter(rows, filters);
 }
 
-// Build Notion API filter object from UI filters
-function buildNotionApiFilter(filters){
+function passesClientFilters(rec, fns){
+  if (!fns || !fns.length) return true;
+  for (let i = 0; i < fns.length; i++) {
+    if (!fns[i](rec)) return false;
+  }
+  return true;
+}
+
+function applyRefRangeFilter(rows, filters){
+  const refStart = clean(filters.refStart);
+  const refEnd = clean(filters.refEnd);
+  if (!refStart && !refEnd) return rows;
+
+  const idx = CANON_HEADERS.map(h => toLower(h)).indexOf(toLower(REF_HEADER));
+  if (idx === -1) return rows;
+
+  return rows.filter(r => {
+    const rid = clean(r[idx]);
+    if (refStart && rid < refStart) return false;
+    if (refEnd && rid > refEnd) return false;
+    return true;
+  });
+}
+
+function buildNotionFilterPlan(filters, dbMeta){
   const clauses = [];
+  const clientFilters = [];
 
   const refPrefix = clean(filters.refPrefix);
-  if (refPrefix){
+  if (refPrefix) {
     clauses.push({ property: 'Ref ID', rich_text: { starts_with: refPrefix } });
   }
 
   const topics = parseList(filters.topics);
-  if (topics.length){
-    const ors = topics.map(tok => ({ property: 'Topic/Chapter', rich_text: { contains: tok } }));
-    clauses.push({ or: ors });
+  if (topics.length) {
+    const topicMeta = lookupPropMeta(dbMeta, ['Topic/Chapter','Topic / Chapter','Topic- Chapter','Topic','Chapter','Chapter/Topic']);
+    const topicOrs = [];
+    if (topicMeta) {
+      topics.forEach(tok => {
+        if (!tok) return;
+        if (topicMeta.type === 'select') {
+          topicOrs.push({ property: topicMeta.name, select: { equals: tok } });
+        } else if (topicMeta.type === 'multi_select') {
+          topicOrs.push({ property: topicMeta.name, multi_select: { contains: tok } });
+        } else {
+          topicOrs.push({ property: topicMeta.name, rich_text: { contains: tok } });
+        }
+      });
+    }
+    if (topicOrs.length) {
+      clauses.push({ or: topicOrs });
+    } else {
+      const lowered = topics.map(t => t.toLowerCase());
+      clientFilters.push(rec => {
+        const hay = toLower(rec.Topic);
+        if (!hay) return false;
+        return lowered.some(tok => hay.indexOf(tok) > -1);
+      });
+    }
   }
 
   const tags = parseList(filters.tags);
-  if (tags.length){
-    const ors = tags.map(t => ({ property: 'Tags', multi_select: { contains: t } }));
-    clauses.push({ or: ors });
+  if (tags.length) {
+    const tagsMeta = lookupPropMeta(dbMeta, ['Tags']);
+    const tagOrs = [];
+    if (tagsMeta) {
+      tags.forEach(t => {
+        if (!t) return;
+        if (tagsMeta.type === 'multi_select') {
+          tagOrs.push({ property: tagsMeta.name, multi_select: { contains: t } });
+        } else if (tagsMeta.type === 'select') {
+          tagOrs.push({ property: tagsMeta.name, select: { equals: t } });
+        }
+      });
+    }
+    if (tagOrs.length) {
+      clauses.push({ or: tagOrs });
+    } else {
+      const loweredTags = tags.map(t => t.toLowerCase());
+      clientFilters.push(rec => {
+        const hay = toLower(rec.Tags);
+        if (!hay) return false;
+        const parts = hay.split(/[,;]+/).map(x => x.trim()).filter(Boolean);
+        const partSet = new Set(parts);
+        return loweredTags.some(tok => partSet.has(tok));
+      });
+    }
   }
 
-  const lastEdited = clean(filters.lastEdited);
-  if (lastEdited){
-    clauses.push({ timestamp: 'last_edited_time', last_edited_time: { on_or_after: lastEdited } });
+  const lastEditedRaw = clean(filters.lastEdited);
+  if (lastEditedRaw) {
+    const iso = formatDateForNotion(lastEditedRaw);
+    if (!iso || !isValidIsoDateString(iso)) {
+      throw new Error('Last Edited Since must be a valid date (YYYY-MM-DD or MM/DD/YYYY).');
+    }
+    clauses.push({ timestamp: 'last_edited_time', last_edited_time: { on_or_after: iso } });
   }
 
-  if (!clauses.length) return null;
-  if (clauses.length === 1) return clauses[0];
-  return { and: clauses };
+  let notion = null;
+  if (clauses.length === 1) notion = clauses[0];
+  else if (clauses.length > 1) notion = { and: clauses };
+
+  return { notion, clientFilters };
+}
+
+function lookupPropMeta(dbMeta, candidates){
+  if (!dbMeta || !dbMeta.properties) return null;
+  const props = dbMeta.properties;
+  for (const key in props) {
+    const norm = normalizeName(key);
+    for (let i = 0; i < candidates.length; i++) {
+      if (norm === normalizeName(candidates[i])) {
+        return { name: key, type: props[key].type };
+      }
+    }
+  }
+  return null;
+}
+
+function isValidIsoDateString(value){
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const date = new Date(value + 'T00:00:00Z');
+  if (isNaN(date.getTime())) return false;
+  const [y, m, d] = value.split('-').map(Number);
+  return date.getUTCFullYear() === y && (date.getUTCMonth() + 1) === m && date.getUTCDate() === d;
 }
 
 function findPageIdByRefId(dbId, refId, cfg){
@@ -833,7 +1431,7 @@ function courseToDbId(course){
   return null;
 }
 
-// Canonical headers (18) – order agnostic
+// Canonical headers (18) - order agnostic
 const CANON_HEADERS = [
   'Question','Question Type','Course','Topic/Chapter','Difficulty','Correct/Incorrect',
   'Choice A','Choice B','Choice C','Choice D','Choice E',
@@ -910,7 +1508,7 @@ function recordToNotionProps(rec){
 }
 
 // ---- Robust Notion reading helpers ----
-function normalizeName(s){ return toLower(String(s||'').replace(/[^a-z0-9]+/g,'')); }
+function normalizeName(s){ return toLower(String(s||'')).replace(/[^a-z0-9]+/g,''); }
 
 function pickProp(props, candidates){
   const keys = Object.keys(props||{});
@@ -993,13 +1591,98 @@ function formatDateFromNotion(iso){
   }catch(e){ return ''; }
 }
 
-function courseToDbId(course){
-  const map = getDbMap();
-  const exact = map[clean(course)];
-  if (exact) return exact;
-  const key = clean(course).split(' ')[0].toUpperCase();
-  for (const name in map){
-    if (name.toUpperCase().startsWith(key)) return map[name];
+function sanitizeCourseMap(input, options){
+  const opts = options || {};
+  const strict = Boolean(opts.strict);
+  const out = {};
+  const seen = new Set();
+  const invalidCourses = [];
+  const duplicateCourses = [];
+  const source = input && typeof input === 'object' ? input : {};
+
+  Object.keys(source).forEach(key => {
+    const name = clean(key);
+    const dbIdRaw = source[key];
+    if (!name) {
+      if (strict) invalidCourses.push('(missing course name)');
+      return;
+    }
+
+    const norm = name.toLowerCase();
+    if (seen.has(norm)) {
+      if (strict) duplicateCourses.push(name);
+      return;
+    }
+
+    const normalizedId = normalizeNotionDatabaseId(dbIdRaw);
+    if (!normalizedId) {
+      if (strict) invalidCourses.push(name);
+      return;
+    }
+
+    seen.add(norm);
+    out[name] = normalizedId;
+  });
+
+  if (strict && (invalidCourses.length || duplicateCourses.length)) {
+    const messages = [];
+    if (invalidCourses.length) {
+      messages.push('Invalid Notion database ID for: ' + invalidCourses.join(', '));
+    }
+    if (duplicateCourses.length) {
+      messages.push('Duplicate course names: ' + duplicateCourses.join(', '));
+    }
+    throw new Error(messages.join('; '));
+  }
+
+  return out;
+}
+
+function normalizeNotionDatabaseId(value){
+  const raw = clean(value);
+  if (!raw) return '';
+
+  const withoutQuery = raw.split('?')[0].trim();
+  const hyphenatedMatch = withoutQuery.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+  if (hyphenatedMatch) {
+    return hyphenatedMatch[0].replace(/-/g, '').toLowerCase();
+  }
+
+  const allHexMatches = withoutQuery.match(/[0-9a-f]{32}/ig);
+  if (allHexMatches && allHexMatches.length) {
+    return allHexMatches[allHexMatches.length - 1].toLowerCase();
+  }
+
+  if (/^[0-9a-f]{32}$/i.test(raw)) {
+    return raw.toLowerCase();
+  }
+
+  return '';
+}
+
+function courseToDbId(course, mapOverride){
+  const map = mapOverride || getDbMap();
+  if (!course) return null;
+  const cleaned = clean(course);
+  if (!cleaned) return null;
+  const names = Object.keys(map || {});
+  if (!names.length) return null;
+
+  if (map.hasOwnProperty(cleaned)) {
+    return map[cleaned];
+  }
+
+  const lower = cleaned.toLowerCase();
+  const ciExact = names.find(name => name.toLowerCase() === lower);
+  if (ciExact) {
+    return map[ciExact];
+  }
+
+  const prefix = cleaned.split(' ')[0].toLowerCase();
+  if (!prefix) return null;
+  const matches = names.filter(name => name.toLowerCase().startsWith(prefix));
+  if (matches.length === 1) {
+    return map[matches[0]];
   }
   return null;
 }
@@ -1036,7 +1719,6 @@ function indexNotionRefs(dbId, cfg){
       if (rid) refs.add(rid);
     });
     cursor = res.has_more ? res.next_cursor : null;
-    Utilities.sleep(80);
   } while(cursor);
   return refs;
 }
@@ -1050,11 +1732,12 @@ function diffSet(aSet, bSet){
 function getSheet(name){ return SpreadsheetApp.getActive().getSheetByName(name); }
 function clean(s){ return (s == null ? '' : String(s)).trim(); }
 function toLower(s){ return clean(s).toLowerCase(); }
-function randShuffle(arr){ for (let i=arr.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [arr[i],arr[j]]=[arr[j]]; } return arr; }
+function valueAt(row, index){ return (index == null || index < 0) ? '' : row[index]; }
+function randShuffle(arr){ for (let i=arr.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [arr[i],arr[j]]=[arr[j],arr[i]]; } return arr; }
 function parseList(s){ return clean(s).split(/[;,]/).map(x=>x.trim()).filter(Boolean); }
 function parseListSemicolon(s){ return clean(s).split(/[;]+/).map(x=>x.trim()).filter(Boolean); }
 function toIntOrZero(s){ s = clean(s); return (s && !isNaN(s)) ? Math.max(0, parseInt(s,10)) : 0; }
-function stripLeadingNum(s){ s = clean(s); return s.replace(/^\s*(?:Q\s*)?\d+\s*[\)\.\-:–—]\s*/i, ''); }
+function stripLeadingNum(s){ s = clean(s); return s.replace(/^\s*(?:Q\s*)?\d+\s*[\)\.\-:]\s*/i, ''); }
 function stripChoicePrefix(s){ s = clean(s); return s.replace(/^\s*[A-E]\s*[\.\)\-:]\s*/i, ''); }
 function cellContainsAny(cellValueLower, needlesLower){
   if(needlesLower.length === 0) return true;
@@ -1080,7 +1763,8 @@ function styleParagraph(p, opts){
     if(opts.bold != null) t.setBold(opts.bold);
     if(opts.italic != null) t.setItalic(opts.italic);
     if(opts.size != null) t.setFontSize(opts.size);
-    if(opts.family) t.setFontFamily(opts.family);
+    const family = opts.fontFamily || opts.family;
+    if(family) t.setFontFamily(family);
   }
   if(opts.center && has(p.setAlignment)) p.setAlignment(DocumentApp.HorizontalAlignment.CENTER);
   if(opts.lineSpacing && has(p.setLineSpacing)) p.setLineSpacing(opts.lineSpacing);
@@ -1102,6 +1786,13 @@ function highlightText(paragraph, textToHighlight) {
   const t = paragraph.editAsText();
   let f = t.findText(textToHighlight);
   while (f) { const s = f.getStartOffset(); const e = f.getEndOffsetInclusive(); if (s !== -1) t.setBold(s, e, true); f = t.findText(textToHighlight, f); }
+}
+
+function formatPercent(count, total){
+  if (!total) return '0%';
+  const pct = Math.round((count * 10000) / total) / 100;
+  const formatted = pct.toFixed(2).replace(/\.00$/, '').replace(/(\.\d)0$/, '$1');
+  return formatted + '%';
 }
 
 // date helpers
